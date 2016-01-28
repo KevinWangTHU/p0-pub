@@ -3,6 +3,16 @@ import re
 import os
 import numpy as np
 
+import gflags
+
+gflags.DEFINE_string('root_path', '.', '', short_name='p')
+gflags.DEFINE_string('dump_prefix', './test', '', short_name='d')
+gflags.DEFINE_integer('max_vocab', -1, '', short_name='mv')
+gflags.DEFINE_integer('max_tok_per_sent', -1, '', short_name='mtps')
+gflags.DEFINE_integer('max_para_per_doc', -1, '', short_name='mppd')
+
+flags = gflags.FLAGS
+
 
 def process_text(file_path):
     text = []
@@ -26,7 +36,7 @@ def process_text(file_path):
             for sent in raw_sents:
                 tokens = nltk.tokenize.casual_tokenize(sent, preserve_case=False)
                 tokens = [unicode(w) if not signs.sub('', w).isdigit() else u'0' \
-                          for w in tokens]
+                          for w in tokens][:flags.max_tok_per_sent]
                 sents.append(tokens)
 
             if is_highlight:
@@ -35,7 +45,7 @@ def process_text(file_path):
             else:
                 text.append(sents)
 
-    return text, highlight 
+    return text[:flags.max_para_per_doc], highlight 
 
 
 def update_wdict(doc, wdict):
@@ -43,23 +53,28 @@ def update_wdict(doc, wdict):
         for tokens in para:
             for w in tokens:
                 if not w in wdict:
-                    t = len(wdict)
-                    wdict[w] = t
+                    wdict[w] = 0
+                wdict[w] += 1
 
 
 def update_doc(doc, wdict):
     ndoc = []
     for para in doc:
-        n_sents = [[wdict[t] for t in sent] for sent in para]
+        n_sents = [[wdict[t] if t in wdict else 0
+                    for t in sent] for sent in para] + [[1]]
         ndoc.append(n_sents)
     return ndoc
 
 
-def main(root_path, dump_prefix):
+def main():
     import sys
     from os.path import isfile, join, splitext
     from operator import itemgetter
     import cPickle
+    #
+    sys.argv = flags(sys.argv)
+    root_path = flags.root_path
+    dump_prefix = flags.dump_prefix
     #
     files = [join(root_path, f) for f in os.listdir(root_path) \
              if isfile(join(root_path, f)) and splitext(join(root_path, f))[1] == '.story']
@@ -71,9 +86,16 @@ def main(root_path, dump_prefix):
         update_wdict(text, wdict)
         update_wdict(highlight, wdict)
         stories.append((text, highlight))
-
-    print >>sys.stderr, "%d words included" % len(wdict)
-
+    #
+    word_freqs = wdict.items()
+    word_freqs.sort(key=lambda x: -x[1])
+    print >>sys.stderr, "%d words of %d included" % (flags.max_vocab + 2, len(wdict))
+    word_freqs = [(x, i + 2) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab]
+    wdict = dict(word_freqs)
+    wdict["%%unk%%"] = 0
+    wdict["%%para_end%%"] = 1
+    n_vocab = len(wdict)
+    #
     nstories = []
     for text, highlight in stories:
         nstories.append((update_doc(text, wdict), update_doc(highlight, wdict)))
@@ -88,5 +110,4 @@ def main(root_path, dump_prefix):
         cPickle.dump(stories, ft)
 
 if __name__ == '__main__':
-    import sys
-    main(sys.argv[1], sys.argv[2])
+    main()

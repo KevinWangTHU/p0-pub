@@ -12,25 +12,19 @@ from util import *
 
 class LSTM:
 
-    params = []
-    W = None
-    U = None
-    b = None
-    h_0 = None
-
     def get_params(self):
         return self.params
 
     def __init__(self, n_input, n_hidden, pref, pdict):
+        self.n_hidden = n_hidden
         self.W = init_matrix_u((n_input, n_hidden * 4), pref + '_w', pdict)
         self.U = init_matrix_u((n_hidden, n_hidden * 4), pref + '_u', pdict)
         self.b = init_matrix_u((n_hidden * 4, ), pref + '_b', pdict)
-        self.h_0 = init_matrix_u((n_hidden, ), pref + '_h_0', pdict)
-        self.params = [self.W, self.U, self.b, self.h_0]
-
+        # self.h_0 = init_matrix_u((n_hidden, ), pref + '_h_0', pdict)
+        self.params = [self.W, self.U, self.b]# , self.h_0]
     
     @staticmethod
-    def step_(x_t, xm_t, pre_c, pre_h, W, U, b):
+    def step_(x_t, xm_t, pre_c, pre_h, W, U, b, n_hidden):
         """
         @param x_t:    T(n_batch, n_input)
         @param xm_t:   T(n_batch,), 01 vector indicating whether ith sequence has ended
@@ -52,11 +46,9 @@ class LSTM:
         c = T.shape_padright(xm_t) * i * c_tilde + f * pre_c
         h = T.shape_padright(xm_t) * o * T.tanh(c)
         return c, h
-
     
     def step(self, x_t, xm_t, pre_c, pre_h):
-        return LSTM.step_(x_t, xm_t, pre_c, pre_h, self.W, self.U, self.b)
-
+        return LSTM.step_(x_t, xm_t, pre_c, pre_h, self.W, self.U, self.b, self.n_hidden)
 
     def forward(self, inputs, masks):
         """
@@ -66,15 +58,14 @@ class LSTM:
                        Note this function should be able to handle concatenated lists,
                        as mask will reset all states (cell & hidden).
         """
-        h_0 = self.h_0
-        n_hidden = h_0.shape[0]
         n_samples = inputs.shape[1]
-        # Make scan happy
-        h_0s = T.extra_ops.repeat(T.shape_padleft(h_0), n_samples, axis=0)
-        [cells, hiddens], update = theano.scan(fn=LSTM.step_,
+        zero = lambda: T.alloc(0.0, n_samples, self.n_hidden)
+        [cells, hiddens], update = theano.scan(fn=lambda x_t, xm_t, pre_c, pre_h, *args:\
+                                                  self.step(x_t, xm_t, pre_c, pre_h),
                                                sequences=[inputs, masks],
-                                               outputs_info=[T.zeros_like(h_0s), h_0s],
-                                               non_sequences=[self.W, self.U, self.b])
+                                               outputs_info=[zero(), zero()],
+                                               non_sequences=[self.W, self.U, self.b],
+                                               strict=True)
         return hiddens
 
 

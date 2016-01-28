@@ -1,7 +1,4 @@
-"""
-# TODO
-"""
-
+import sys
 import theano
 import theano.tensor as T
 import numpy as np
@@ -10,61 +7,55 @@ import lstm
 import optimizer
 from util import *
 
-import gflags
+flags = None
 
-flags = gflags.FLAGS
 
 class Attention:
 
-    """
-    @fn: (x: Tensor) (y: Tensor) -> Tensor
+    @staticmethod
+    def bilinear_fn(x, y, W, U, xb, yb):
+        """
         @param x: shape (batch_size, n_sent, s0)
         @param y: shape (batch_size, s1)
-        @return:  shape (batch_size, n_sent,); attention strength
-    """
+        @return:  shape (batch_size, s2): batched contexts
+        """
+        prob = T.batched_dot(T.dot(x, W), y) + T.dot(x, xb) + T.dot(y, yb)
+        context = T.batched_dot(prob, x)               # (batch_size, s0)
+        return T.dot(context, U)
 
-    def __init__(self, s0, s1, att_type, pref, pdict):
+
+    def __init__(self, s0, s1, s2, att_type, pref, pdict):
         if att_type == 'bilinear':
-            W = init_matrix_u((s0, s1), pref + '_att_W', pdict)
-            xb = init_matrix_u((s0,), pref + '_att_xb', pdict)
-            yb = init_matrix_u((s1,), pref + '_att_yb', pdict)
-            self.get_params = lambda: [W, xb, yb]
-            self.fn = lambda x, y: \
-                T.batched_dot(T.dot(x, W), y) + T.dot(x, xb) + T.dot(y, yb) # will be broadcasted.
+            self.W = init_matrix_u((s0, s1), pref + '_W', pdict)
+            self.U = init_matrix_u((s1, s2), pref + '_U', pdict) # s1 > s2. Encourages sparsity
+            self.xb = init_matrix_u((s0,), pref + '_xb', pdict)
+            self.yb = init_matrix_u((s1,), pref + '_yb', pdict)
+            self.get_params = lambda: [self.W, self.U, self.xb, self.yb]
+            self.fn = lambda x, y: Attention.bilinear_fn(x, y, self.W, self.U, self.xb, self.yb)
         else:
             assert False
 
 
 class WordEncoder:
 
-    rnn = None
-
     def __init__(self, pdict):
-        rnn = lstm.LSTM(flags['n_emb'], flags['n_hidden'], 'wordenc', pdict)
+        self.rnn = lstm.LSTM(flags['n_embed'], flags['n_hidden'], 'wordenc', pdict)
 
     def get_params(self):
         return self.rnn.get_params()
 
-    def encode(self, sentence, mask):
+    def forward(self, sentence, mask):
         """
-        @param sentence: T(*tot_sent_len, batch_size, embed_size)
-                         i.e. multiple sentences can be concatenated, seperated by 0 mask 
-        @param mask:     T(*tot_sent_len, batch_size)  
-        @return:         T(*tot_sent_len, batch_size, n_hidden)
+        multiple sentences can be concatenated and passed in, if seperated by 0 mask 
         """
         return self.rnn.forward(sentence, mask)
 
 
 class SentEncoder:
 
-    word_encoder = None
-    rnn = None
-    n_hidden = None
-
     def __init__(self, pdict):
-        word_encoder = WordEncoder(flags, pdict)
-        n_hidden = flags['n_hidden']
-        rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'sentenc', pdict)
+        self.word_encoder = WordEncoder(pdict)
+        self.rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'sentenc', pdict)
     
     def get_params(self):
         return self.rnn.get_params() + self.word_encoder.get_params()
@@ -84,36 +75,33 @@ class SentEncoder:
                               h_word: None (for future compatibility)
         """
 
-        # == Word-level encoding ==
-        sent_embed = self.word_encoder.encode(concat_sents, concat_masks)
+        # Word-level encoding
+        sent_embed = self.word_encoder.forward(concat_sents, concat_masks) # (ssl, bs, nh)
 
-        # == Reshape ==
-        sent_embed_reshaped = T.reshape(sent_embed, [sent_embed.shape[0] * sent_embed.shape[1]] 
-                                                     + sent_embed.shape[2:])
-        doc_hidden = theano.scan(sequences=[doc_sent_pos, sent_embed],
-                                 outputs_info=None,
-                                 non_sequences=sent_embed_reshaped,
-                                 fn=lambda batch_pos, sent_embed_rs: sent_embed_rs[batch_pos])
+        # Reorder
+        sent_embed_reshaped = T.reshape(sent_embed, [sent_embed.shape[0] * sent_embed.shape[1], 
+                                                     sent_embed.shape[2]])
+        doc_hidden, _ = theano.scan(sequences=doc_sent_pos,
+                                    outputs_info=None,
+                                    non_sequences=[sent_embed_reshaped],
+                                    fn=lambda batch_pos, sent_embed_rs: sent_embed_rs[batch_pos],
+                                    strict=True)
         # doc_hidden.shape ~ [n_sent, doc_batch_size, n_hidden]
 
-        # == sentence-level RNN ==
+        # sentence-level RNN
         h_encs = self.rnn.forward(doc_hidden, doc_mask)
         return (h_encs, None)
         
 
 class WordDecoder:
 
-    rnn = None
-    W = None
-    b = None
-
     def get_params(self):
         return self.rnn.get_params() + [self.W, self.b]
 
     def __init__(self, pdict):
-        self.rnn = LSTM.lstm(flags['n_hidden'], flags['n_hidden'], 'worddec_rnn', pdict)
-        W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
-        b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
+        self.rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'worddec_rnn', pdict)
+        self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
+        self.b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
     
     def decode(self, h_0, exp_word, exp_mask):
         """
@@ -129,31 +117,27 @@ class WordDecoder:
             @param exp_mask:     T(batch_size,)
             @param c_tm1, h_tm1: T(batch_size, hidden_size)
             """
-            c_t, h_t = rnn.step(x_tm1, exp_mask, c_tm1, h_tm1)
+            c_t, h_t = self.rnn.step(x_tm1, exp_mask, c_tm1, h_tm1)
             act_word = T.nnet.softmax(T.dot(h_t, self.W) + self.b)
             prob = exp_mask * T.sum(exp_word * T.log(act_word + 1e-6), axis=1)
             return c_t, h_t, exp_word, prob
-
+        
+        batch_size = h_0.shape[0]
         [_, h_decs, _, probs], _ = \
             theano.scan(fn=step,
                         sequences=[exp_word, exp_mask],
                         outputs_info=[T.alloc(0.0, batch_size, flags['n_hidden']),
-                                      T.alloc(0.0, batch_size, flags['n_hidden']),
+                                      h_0,
                                       T.alloc(0.0, batch_size, flags['n_embed']),
                                       None],
-                        non_sequences=self.get_params())
+                        non_sequences=self.get_params(),
+                        strict=True)
 
         prob = T.sum(probs, axis=0)
         return h_decs[-1], prob
 
 
 class SoftDecoder:
-
-    encoder = None # Sentence-level Encoder
-    decoder = None # Word-level Decoder
-    rnn = None     # Sentence-level RNN for decoding
-    att = None     # Attention for self.rnn
-    embed = None   # Word embedding
 
     def get_params(self):
         return self.att.get_params() + self.rnn.get_params() + \
@@ -167,11 +151,13 @@ class SoftDecoder:
         else:
             pdict = None
 
-        self.encoder = SentEncoder(flags, pdict)
-        self.decoder = WordDecoder(flags, pdict)
-        self.att = Attention(flags['n_hidden'], flags['n_hidden'], 'bilinear', 'mn_sft_att', pdict)
-        self.rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'rnn_doc_dec', pdict)
-        self.embed = init_matrix_u(flags['n_vocab'], flags['n_hidden'], 'word_embedding', pdict)
+        self.encoder = SentEncoder(pdict)
+        self.decoder = WordDecoder(pdict)
+        self.att = Attention(flags['n_hidden'], flags['n_hidden'], flags['n_context'], 
+                             'bilinear', 'mn_sft_att', pdict)
+        self.rnn = lstm.LSTM(flags['n_hidden'] + flags['n_context'], flags['n_hidden'], 
+                             'rnn_doc_dec', pdict)
+        self.embed = init_matrix_u((flags['n_vocab'], flags['n_hidden']), 'word_embedding', pdict)
 
     def save(self, file_):
         params = self.get_params()
@@ -188,6 +174,7 @@ class SoftDecoder:
                         X[0] ~ T(*sum_sent_len, *batch_size) [i64, data]
                         X[1] ~ T(*sum_sent_len, *batch_size) [f32, mask]
                         X[2] ~ T(*n_sent, *doc_batch_size)   [i64, doc_sent_pos]
+                        X[3] ~ T(*n_sent, *doc_batch_size)   [f32, doc_mask]
         @param Y:       Expected sentences, where
         @param Y[0]:    T(*n_sent, *sent_len, *doc_batch_size) [i64]
         @param Y[1]:    Mask of (each sentence in) Y[0], shape=Y[0].shape, dtype=f32
@@ -198,8 +185,9 @@ class SoftDecoder:
         X[0] = self.embed[X[0]]
         Y[0] = self.embed[Y[0]]
 
-        h_sentences, _ = self.encoder.forward(X[0], X[1], X[2], X[3])
+        h_sentences, _ = self.encoder.forward(*X)
         h_sentences = h_sentences.dimshuffle((1, 0, 2))  # OPTME
+        # ~ [d_b_s, n_s, n_h]
         
         # Decoder LSTM with attention
         def step(exp_sent, exp_mask, doc_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, *args):
@@ -214,25 +202,25 @@ class SoftDecoder:
             @*args:     non_sequences that theano should put into GPU 
             """ 
             # Soft attention
-            att_prob = T.nnet.softmax(self.att.fn(h_encs, h_dec_tm1)) # (batch_size, n_sent) 
-            att_context = T.batched_dot(att_prob, h_encs)               # (batch_size, hidden_size)
+            att_context = self.att.fn(h_encs, h_dec_tm1) # (doc_batch_size, n_context)
             inp = T.concatenate([x_dec_tm1, att_context], axis=1)
             c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, c_dec_tm1, h_dec_tm1) 
-            x_dec_t, prob = word_decoder.decode(h_dec_t, exp_sent, exp_mask) 
+            x_dec_t, prob = self.decoder.decode(h_dec_t, exp_sent, exp_mask) 
             return h_dec_t, c_dec_t, x_dec_t, prob
         
+        batch_size = h_sentences.shape[0]
         scan_params = self.rnn.get_params() + self.att.get_params() + self.decoder.get_params()
-        [h_decs, c_decs, x_decs, probs], _ = \
+        [h_decs, _, _, probs], _ = \
             theano.scan(fn = step,
-                        sequences = [Y[0], Y[1], Y[2]],
-                        outputs_info = [T.alloc(0.0, batch_size, hidden_size),
-                                        T.alloc(0.0, batch_size, hidden_size),
-                                        T.alloc(0.0, batch_size, hidden_size),
+                        sequences = Y,
+                        outputs_info = [T.alloc(0.0, batch_size, flags['n_hidden']),
+                                        T.alloc(0.0, batch_size, flags['n_hidden']),
+                                        T.alloc(0.0, batch_size, flags['n_hidden']),
                                         None],
-                        non_sequences = [h_sentences] + scan_params)
-
+                        non_sequences = [h_sentences] + scan_params,
+                        strict=True)
         loss = -T.sum(probs)
-        grad = T.grad(-loss, self.get_params())
+        grad = T.grad(-loss, self.get_params()) 
         grad_updates = optimizer.optimize(flags['optimizer'], self.get_params(), grad, {}, flags)
         return loss, grad_updates
 
