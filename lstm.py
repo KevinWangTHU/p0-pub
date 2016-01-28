@@ -21,11 +21,11 @@ class LSTM:
     def get_params(self):
         return self.params
 
-    def __init__(self, n_input, n_hidden, pref):
-        self.W = init_matrix_u((n_input, n_hidden * 4), pref + '_w')
-        self.U = init_matrix_u((n_hidden, n_hidden * 4), pref + '_u')
-        self.b = init_matrix_u((n_hidden * 4, ), pref + '_b')
-        self.h_0 = init_matrix_u((n_hidden, ), pref + '_h_0')
+    def __init__(self, n_input, n_hidden, pref, pdict):
+        self.W = init_matrix_u((n_input, n_hidden * 4), pref + '_w', pdict)
+        self.U = init_matrix_u((n_hidden, n_hidden * 4), pref + '_u', pdict)
+        self.b = init_matrix_u((n_hidden * 4, ), pref + '_b', pdict)
+        self.h_0 = init_matrix_u((n_hidden, ), pref + '_h_0', pdict)
         self.params = [self.W, self.U, self.b, self.h_0]
 
     
@@ -49,7 +49,7 @@ class LSTM:
         f = T.nnet.sigmoid(slice_(pre_activation, 1))
         i = T.nnet.sigmoid(slice_(pre_activation, 2))
         c_tilde = T.tanh(slice_(pre_activation, 3))
-        c = i * c_tilde + f * pre_c
+        c = T.shape_padright(xm_t) * i * c_tilde + f * pre_c
         h = T.shape_padright(xm_t) * o * T.tanh(c)
         return c, h
 
@@ -63,6 +63,8 @@ class LSTM:
         @param inputs: [T((len, n_batch, n_input))]
         @param masks:  [T((len, n_batch))], 01 matrix
         @return:       [T((len, n_batch, n_hidden))], list of hidden layers
+                       Note this function should be able to handle concatenated lists,
+                       as mask will reset all states (cell & hidden).
         """
         h_0 = self.h_0
         n_hidden = h_0.shape[0]
@@ -89,7 +91,7 @@ def dropout(data, switch, prob, rng):
 
 def task_model(flags):
     # Word embedding matrix
-    W = init_matrix_u((flags['n_words'], flags['n_input']), 'tW')
+    W = init_matrix_u((flags['n_vocab'], flags['n_input']), 'tW')
     # For logistic layer
     U = init_matrix_u((flags['n_hidden'], flags['n_labels']), 'lW')
     b = init_matrix_u((flags['n_labels'],), 'lb')
@@ -145,7 +147,7 @@ def train_lstm(train, valid, test, flags):
     from itertools import chain
     cmax = lambda arr: max(chain.from_iterable(arr))
     flags['n_labels'] = 1 + max([max(p[1]) for p in [train, valid, test]])
-    flags['n_words']  = 1 + max([cmax(p[0]) for p in [train, valid, test]])
+    flags['n_vocab']  = 1 + max([cmax(p[0]) for p in [train, valid, test]])
     
     print flags
 

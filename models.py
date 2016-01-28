@@ -23,11 +23,11 @@ class Attention:
         @return:  shape (batch_size, n_sent,); attention strength
     """
 
-    def __init__(self, s0, s1, att_type, pref):
+    def __init__(self, s0, s1, att_type, pref, pdict):
         if att_type == 'bilinear':
-            W = init_matrix_u((s0, s1), pref + '_att_W')
-            xb = init_matrix_u((s0,), pref + '_att_xb')
-            yb = init_matrix_u((s1,), pref + '_att_yb')
+            W = init_matrix_u((s0, s1), pref + '_att_W', pdict)
+            xb = init_matrix_u((s0,), pref + '_att_xb', pdict)
+            yb = init_matrix_u((s1,), pref + '_att_yb', pdict)
             self.get_params = lambda: [W, xb, yb]
             self.fn = lambda x, y: \
                 T.batched_dot(T.dot(x, W), y) + T.dot(x, xb) + T.dot(y, yb) # will be broadcasted.
@@ -39,17 +39,18 @@ class WordEncoder:
 
     rnn = None
 
-    def __init__(self):
-        rnn = lstm.LSTM(flags['n_emb'], flags['n_hidden'], 'wordenc')
+    def __init__(self, pdict):
+        rnn = lstm.LSTM(flags['n_emb'], flags['n_hidden'], 'wordenc', pdict)
 
     def get_params(self):
         return self.rnn.get_params()
 
     def encode(self, sentence, mask):
         """
-        @param sentence: T(*sent_len, batch_size, embed_size)
-        @param mask:     T(*sent_len, batch_size)  
-        @return:         T(*sent_len, batch_size, n_hidden)
+        @param sentence: T(*tot_sent_len, batch_size, embed_size)
+                         i.e. multiple sentences can be concatenated, seperated by 0 mask 
+        @param mask:     T(*tot_sent_len, batch_size)  
+        @return:         T(*tot_sent_len, batch_size, n_hidden)
         """
         return self.rnn.forward(sentence, mask)
 
@@ -60,49 +61,36 @@ class SentEncoder:
     rnn = None
     n_hidden = None
 
-    def __init__(self):
-        word_encoder = WordEncoder(flags)
+    def __init__(self, pdict):
+        word_encoder = WordEncoder(flags, pdict)
         n_hidden = flags['n_hidden']
-        rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'sentenc')
+        rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'sentenc', pdict)
     
     def get_params(self):
         return self.rnn.get_params() + self.word_encoder.get_params()
 
-    def batch_word_encode(self, all_sent_list, all_mask_list):
+    def forward(self, concat_sents, concat_masks, doc_sent_pos, doc_mask):
         """
-        @return: T(n_batches, batch_size, n_hidden)
-        """
-        def step(sent_batch, mask_batch, *args):
-            return self.word_encoder.encode(sent_batch, mask_batch)[-1]
-        # 
-        code, _ = theano.scan(fn=step,
-                              sequences=[all_sent_list, all_mask_list],
-                              outputs_info=T.alloc(0.0, batch_size, self.n_hidden),
-                              non_sequences=self.word_encoder.get_params())
-        return code
-
-    def forward(self, all_sent_list, all_mask_list, doc_sent_pos, doc_mask):
-        """
-        @param all_sent_list: T(*n_batches, *sent_len, *batch_size, n_embed)
-        @param all_mask_list: T(*n_batches, *sent_len, *batch_size) (Int)
-        @param doc_sent_pos:  T(*n_sent, *doc_batch_size)
-                              doc_sent_pos[i,j] = pos of jth sentence in ith document (in cur batch)
-                                                  in all_sent_list/all_mask_list,
-                                                  assuming their first two axises are flattened.
-        @param doc_mask:      T(*n_sent, *doc_batch_size)
-                              mask matrix marking the end of each document
-        @return:              (h_sent, h_word) where
-                               h_sent: T(*n_sent, *doc_batch_size, n_hidden)  
-                               h_word: None (for future compatibility)
+        @param concat_sents: T(*sum_sent_len, *batch_size, n_embed)
+        @param concat_masks: T(*sum_sent_len, *batch_size) 
+        @param doc_sent_pos: T(*n_sent, *doc_batch_size)
+                             doc_sent_pos[j,i] = pos of jth sentence in ith document (in cur batch)
+                                                 in all_sent_list/all_mask_list,
+                                                 assuming their first two axises are flattened.
+        @param doc_mask:     T(*n_sent, *doc_batch_size)
+                             mask matrix marking the end of each document
+        @return:             (h_sent, h_word) where
+                              h_sent: T(*n_sent, *doc_batch_size, n_hidden)  
+                              h_word: None (for future compatibility)
         """
 
         # == Word-level encoding ==
-        sent_embed = self.batch_word_encode(all_sent_list, doc_sent_pos)
-        n_hidden = sent_embed.shape[2]
+        sent_embed = self.word_encoder.encode(concat_sents, concat_masks)
 
         # == Reshape ==
-        sent_embed_reshaped = T.reshape(sent_embed, [sent_embed.shape[0] * sent_embed.shape[1]] + sent_embed.shape[2:])
-        doc_hidden = theano.scan(sequences=doc_sensent_embed_pos,
+        sent_embed_reshaped = T.reshape(sent_embed, [sent_embed.shape[0] * sent_embed.shape[1]] 
+                                                     + sent_embed.shape[2:])
+        doc_hidden = theano.scan(sequences=[doc_sent_pos, sent_embed],
                                  outputs_info=None,
                                  non_sequences=sent_embed_reshaped,
                                  fn=lambda batch_pos, sent_embed_rs: sent_embed_rs[batch_pos])
@@ -122,10 +110,10 @@ class WordDecoder:
     def get_params(self):
         return self.rnn.get_params() + [self.W, self.b]
 
-    def __init__(self):
-        self.rnn = LSTM.lstm(flags['n_hidden'], flags['n_hidden'], 'worddec_rnn')
-        W = init_matrix_u((flags['n_hidden'], flags['n_words']), 'worddec_W')
-        b = init_matrix_u((flags['n_words'],), 'worddec_b')
+    def __init__(self, pdict):
+        self.rnn = LSTM.lstm(flags['n_hidden'], flags['n_hidden'], 'worddec_rnn', pdict)
+        W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
+        b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
     
     def decode(self, h_0, exp_word, exp_mask):
         """
@@ -165,27 +153,51 @@ class SoftDecoder:
     decoder = None # Word-level Decoder
     rnn = None     # Sentence-level RNN for decoding
     att = None     # Attention for self.rnn
+    embed = None   # Word embedding
 
     def get_params(self):
         return self.att.get_params() + self.rnn.get_params() + \
-            self.encoder.get_params() + self.decoder.get_params()
+            self.encoder.get_params() + self.decoder.get_params() + \
+            [self.embed]
 
     def __init__(self):
-        self.encoder = SentEncoder(flags)
-        self.decoder = WordDecoder(flags)
-        self.att = Attention(flags['n_hidden'], flags['n_hidden'], 'bilinear', 'mn_sft_att')
-        self.rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'rnn_doc_dec')
+        if flags['load_npz'].strip() != "":
+            pdict = np.load(flags['load_npz'].strip())
+            np.random.set_state(pdict['__np_random_state__'])
+        else:
+            pdict = None
+
+        self.encoder = SentEncoder(flags, pdict)
+        self.decoder = WordDecoder(flags, pdict)
+        self.att = Attention(flags['n_hidden'], flags['n_hidden'], 'bilinear', 'mn_sft_att', pdict)
+        self.rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'rnn_doc_dec', pdict)
+        self.embed = init_matrix_u(flags['n_vocab'], flags['n_hidden'], 'word_embedding', pdict)
+
+    def save(self, file_):
+        params = self.get_params()
+        pdict = {}
+        for p in params:
+            assert not (p.name in pdict)
+            pdict[p.name] = p.get_value()
+        pdict['__np_random_state__'] = np.random.get_state()
+        np.savez(file_, **pdict)
 
     def train(self, X, Y):
         """
-        @param X[0..3]: Input doc info. Check SentEncoder.forward.
+        @param X[0..3]: Input doc info. Check SentEncoder.forward
+                        X[0] ~ T(*sum_sent_len, *batch_size) [i64, data]
+                        X[1] ~ T(*sum_sent_len, *batch_size) [f32, mask]
+                        X[2] ~ T(*n_sent, *doc_batch_size)   [i64, doc_sent_pos]
         @param Y:       Expected sentences, where
-        @param Y[0]:    T(*n_sent, *sent_len, *doc_batch_size, n_embed)
-        @param Y[1]:    Mask of (each sentence in) Y[0], shape=Y[0].shape[:-1]
+        @param Y[0]:    T(*n_sent, *sent_len, *doc_batch_size) [i64]
+        @param Y[1]:    Mask of (each sentence in) Y[0], shape=Y[0].shape, dtype=f32
                         0 if sentence does not exist (reached EOD)
         @param Y[2]:    Document-level mask of Y[0], shape=[*n_sent, *doc_batch_size]
         @return: (update dict, loss)
         """
+        X[0] = self.embed[X[0]]
+        Y[0] = self.embed[Y[0]]
+
         h_sentences, _ = self.encoder.forward(X[0], X[1], X[2], X[3])
         h_sentences = h_sentences.dimshuffle((1, 0, 2))  # OPTME
         
@@ -221,6 +233,6 @@ class SoftDecoder:
 
         loss = -T.sum(probs)
         grad = T.grad(-loss, self.get_params())
-        grad_updates = optimizer.optimize('RMSProp2', self.get_params(), grad, {}, flags)
-
+        grad_updates = optimizer.optimize(flags['optimizer'], self.get_params(), grad, {}, flags)
+        return loss, grad_updates
 

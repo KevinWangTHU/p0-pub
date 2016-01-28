@@ -1,11 +1,14 @@
 import theano
 import numpy as np
 
-def init_matrix_u(shape, name=''):
+def init_matrix_u(shape, name='', pdict=None):
     """
     @type shape: tuple
     @return:     theano.SharedVariable
     """
+    if pdict:
+        assert name in pdict
+        return theano.shared(pdict[name])
     if len(shape) == 1: 
         m = np.sqrt(6.0 / (shape[0] + 1))
     else:
