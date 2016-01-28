@@ -30,8 +30,9 @@ class LSTM:
         @param xm_t:   T(n_batch,), 01 vector indicating whether ith sequence has ended
         @param pre_c:  T(n_batch, n_input)
         @param pre_h:  T(n_batch, n_input)
-        @param W, U:   T(n_input, 4 * n_hidden)
-        @param hidden: T(4 * n_hidden,)
+        @param W:      T(n_input, 4 * n_hidden)
+        @param U:      T(n_hidden, 4 * n_hidden)
+        @param b:      T(4 * n_hidden,)
         return 0 when beyond EOS
         """
 

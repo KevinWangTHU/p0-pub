@@ -53,8 +53,8 @@ def build_sent_batch(sentences_annotated, n_sent_batch, n_docs, max_doc_len):
 
 def build_input(docs, flags):
     """
-    @return:    [(concated_sent, concated_mask, doc_sent_pos, doc_mask, 
-                  hl_sent_data, hl_sent_mask, hl_doc_mask) for each batch]
+    @return:    [(id, (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
+                       hl_sent_data, hl_sent_mask, hl_doc_mask)) for each batch]
     """
 
     # Sort documents by number of sentences
@@ -112,7 +112,7 @@ def build_input(docs, flags):
                         hl_sent_data, hl_sent_mask, hl_doc_mask))
 
     log_info({'type': 'data', 'value': 'data loaded'})
-    return batches
+    return list(enumerate(batches))
 
 
 def load_data(flags):

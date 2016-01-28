@@ -19,7 +19,7 @@ class Attention:
         @param y: shape (batch_size, s1)
         @return:  shape (batch_size, s2): batched contexts
         """
-        prob = T.batched_dot(T.dot(x, W), y) + T.dot(x, xb) + T.dot(y, yb)
+        prob = T.batched_dot(T.dot(x, W), y) + T.dot(x, xb) + T.dot(y, yb).dimshuffle(0, 'x')
         context = T.batched_dot(prob, x)               # (batch_size, s0)
         return T.dot(context, U)
 
@@ -98,29 +98,40 @@ class WordDecoder:
     def get_params(self):
         return self.rnn.get_params() + [self.W, self.b]
 
-    def __init__(self, pdict):
-        self.rnn = lstm.LSTM(flags['n_hidden'], flags['n_hidden'], 'worddec_rnn', pdict)
+    def __init__(self, embed, pdict):
+        self.rnn = lstm.LSTM(flags['n_embed'], flags['n_hidden'], 'worddec_rnn', pdict)
+        self.embed = embed
         self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
         self.b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
     
     def decode(self, h_0, exp_word, exp_mask):
         """
         @param h_0:      T(batch_size, n_hidden)
-        @param exp_word: T(*sent_len, batch_size, embed_size); expected sentence (batch)
+        @param exp_word: T(*sent_len, batch_size); expected sentence (batch)
+                         exp_word[i][j] = k => expecting token <k>
         @param exp_mask: exp_word.shape[:2]; EOS indicator
         @return:         (last_hidden, prob)
                          where prob.shape ~ [batch_size]
         """
+        n_batch = exp_word.shape[1]
+        ruler, _ = theano.scan(fn = lambda pre: pre+1,
+                               outputs_info = [T.cast(T.alloc(-1), 'int64')],
+                               n_steps = n_batch)
+        ruler = n_batch * ruler
+        # ruler = [0, n_batch, ..., (n_batch - 1) * n_batch]
+
         def step(exp_word, exp_mask, c_tm1, h_tm1, x_tm1, *args):
             """
-            @param exp_word:     T(batch_size, embed_size)
+            @param exp_word:     T(batch_size,) 
             @param exp_mask:     T(batch_size,)
             @param c_tm1, h_tm1: T(batch_size, hidden_size)
+            @param x_tm1:        T(batch_size, embed_size)
             """
             c_t, h_t = self.rnn.step(x_tm1, exp_mask, c_tm1, h_tm1)
             act_word = T.nnet.softmax(T.dot(h_t, self.W) + self.b)
-            prob = exp_mask * T.sum(exp_word * T.log(act_word + 1e-6), axis=1)
-            return c_t, h_t, exp_word, prob
+            prob = T.flatten(act_word)[exp_word + ruler] + 1e-6
+            log_prob = exp_mask * T.log(prob)
+            return c_t, h_t, self.embed[exp_word], log_prob
         
         batch_size = h_0.shape[0]
         [_, h_decs, _, probs], _ = \
@@ -130,8 +141,8 @@ class WordDecoder:
                                       h_0,
                                       T.alloc(0.0, batch_size, flags['n_embed']),
                                       None],
-                        non_sequences=self.get_params(),
-                        strict=True)
+                        non_sequences=self.get_params() + [self.embed, ruler],
+                        strict=True) 
 
         prob = T.sum(probs, axis=0)
         return h_decs[-1], prob
@@ -152,12 +163,12 @@ class SoftDecoder:
             pdict = None
 
         self.encoder = SentEncoder(pdict)
-        self.decoder = WordDecoder(pdict)
         self.att = Attention(flags['n_hidden'], flags['n_hidden'], flags['n_context'], 
                              'bilinear', 'mn_sft_att', pdict)
         self.rnn = lstm.LSTM(flags['n_hidden'] + flags['n_context'], flags['n_hidden'], 
                              'rnn_doc_dec', pdict)
-        self.embed = init_matrix_u((flags['n_vocab'], flags['n_hidden']), 'word_embedding', pdict)
+        self.embed = init_matrix_u((flags['n_vocab'], flags['n_embed']), 'word_embedding', pdict)
+        self.decoder = WordDecoder(self.embed, pdict)
 
     def save(self, file_):
         params = self.get_params()
@@ -183,8 +194,7 @@ class SoftDecoder:
         @return: (update dict, loss)
         """
         X[0] = self.embed[X[0]]
-        Y[0] = self.embed[Y[0]]
-
+        
         h_sentences, _ = self.encoder.forward(*X)
         h_sentences = h_sentences.dimshuffle((1, 0, 2))  # OPTME
         # ~ [d_b_s, n_s, n_h]
@@ -192,7 +202,7 @@ class SoftDecoder:
         # Decoder LSTM with attention
         def step(exp_sent, exp_mask, doc_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, *args):
             """
-            @exp_sent:  T(*sent_len, *doc_batch_size, n_embed);  expected sentence (batch)
+            @exp_sent:  T(*sent_len, *doc_batch_size) [i64]      expected sentence (batch)
             @exp_mask:  shape ~ exp_sent.shape[:-1];             sent-level mask of cur sentence
             @doc_mask:  T(*doc_batch_size,);                     doc-level mask
             @h_dec_tm1: T(*doc_batch_size, n_hidden);            previous hidden layer
@@ -209,7 +219,8 @@ class SoftDecoder:
             return h_dec_t, c_dec_t, x_dec_t, prob
         
         batch_size = h_sentences.shape[0]
-        scan_params = self.rnn.get_params() + self.att.get_params() + self.decoder.get_params()
+        scan_params = self.rnn.get_params() + self.att.get_params() + self.decoder.get_params() \
+                    + [self.embed]
         [h_decs, _, _, probs], _ = \
             theano.scan(fn = step,
                         sequences = Y,
