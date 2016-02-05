@@ -29,3 +29,13 @@ def concat(l):
     return reduce(operator.add, l)
 
 
+def dropout(data, switch, prob, rng):
+    """
+    @param prob:   Pr[drop_unit]
+    @param switch: 1{use_dropout}
+    """
+    prob = T.cast(1 - prob, dtype='float32')
+    mask = rng.binomial(size=data.shape, n=1, p=prob, dtype='float32')
+    return theano.ifelse.ifelse(T.lt(0.1, switch),
+                                mask * data,
+                                prob * data)
