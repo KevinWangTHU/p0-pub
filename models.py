@@ -1,3 +1,5 @@
+# TODO: Test deploy
+
 import sys
 import theano
 import theano.tensor as T
@@ -9,7 +11,6 @@ from util import *
 
 
 flags = None
-dropout_switch_ = theano.shared(np.asarray(1.0, dtype='float32'))
 
 
 class Attention:
@@ -27,23 +28,25 @@ class Attention:
 
 
     def __init__(self, s0, s1, s2, att_type, pref, pdict):
+        """
+        s1 should be > s2 to encourage sparsity
+        """
         if att_type == 'bilinear':
             self.W = init_matrix_u((s0, s1), pref + '_W', pdict)
-            self.U = init_matrix_u((s1, s2), pref + '_U', pdict) # s1 > s2. Encourages sparsity
+            self.U = init_matrix_u((s1, s2), pref + '_U', pdict) 
             self.xb = init_matrix_u((s0,), pref + '_xb', pdict)
             self.yb = init_matrix_u((s1,), pref + '_yb', pdict)
             self.get_params = lambda: [self.W, self.U, self.xb, self.yb]
-            self.fn = lambda x, y: Attention.bilinear_fn(x, y, self.W, self.U, self.xb, self.yb)
+            self.__call__ = lambda x, y: Attention.bilinear_fn(x, y, self.W, self.U, self.xb, self.yb)
         else:
             assert False
 
 
 class WordEncoder:
 
-    def __init__(self, pdict):
+    def __init__(self, pdict, dropout):
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_embed'], flags['n_hidden'], 
-                             flags['dropout_prob'], 
-                             'wordenc_rnn', pdict)
+                             dropout, 'wordenc_rnn', pdict)
 
     def get_params(self):
         return self.rnn.get_params()
@@ -53,15 +56,16 @@ class WordEncoder:
         @return: (result, updates)
         multiple sentences can be concatenated and passed in, if seperated by 0 mask 
         """
-        return self.rnn.forward(sentence, mask)[:, -1]
+        hiddens, updates = self.rnn.forward(sentence, mask)
+        return hiddens[:, -1], updates
 
 
 class SentEncoder:
 
-    def __init__(self, pdict):
-        self.word_encoder = WordEncoder(pdict)
+    def __init__(self, pdict, dropout):
+        self.word_encoder = WordEncoder(pdict, dropout)
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'], flags['n_hidden'], 
-                             'sentenc_rnn', pdict)
+                             dropout, 'sentenc_rnn', pdict)
     
     def get_params(self):
         return self.rnn.get_params() + self.word_encoder.get_params()
@@ -80,10 +84,10 @@ class SentEncoder:
                               h_sent: T(*n_sent, *n_doc_batch, n_hidden)  
         """
 
-        # Word-level encoding
+        # == Word-level encoding ==
         sent_embed, upd0 = self.word_encoder.forward(concat_sents, concat_masks) # (ssl, bs, nh)
 
-        # Reorder
+        # == Reorder ==
         sent_embed_reshaped = T.reshape(sent_embed, [sent_embed.shape[0] * sent_embed.shape[1], 
                                                      sent_embed.shape[2]])
         doc_hidden, _ = theano.scan(sequences=doc_sent_pos,
@@ -93,10 +97,10 @@ class SentEncoder:
                                     strict=True)
         # doc_hidden.shape ~ [n_sent, n_doc_batch, n_hidden]
 
-        # sentence-level RNN
+        # == Sentence-level == 
         h_encs, upd1 = self.rnn.forward(doc_hidden, doc_mask)
         h_encs = h_encs[:, -1] # Remove all but the highest layer
-        return (h_encs, upd0 + upd1)
+        return h_encs, concat_updates(upd0, upd1)
         
 
 class WordDecoder:
@@ -104,12 +108,13 @@ class WordDecoder:
     def get_params(self):
         return self.rnn.get_params() + [self.W, self.b]
 
-    def __init__(self, embed, pdict):
+    def __init__(self, embed, pdict, dropout):
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_embed'], flags['n_hidden'],
-                             'worddec_rnn', pdict)
+                             dropout, 'worddec_rnn', pdict)
         self.embed = embed
         self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
         self.b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
+        self.dropout = dropout
     
     def decode(self, h_0, exp_word, exp_mask):
         """
@@ -123,7 +128,7 @@ class WordDecoder:
         n_batch = exp_word.shape[1]
         
         # Forward to RNN
-        hiddens, upd0 = self.rnn.forward(self.embed[exp_word], exp_mask, h_0=h_0, delta_t=-1)
+        hiddens, upd_rnn = self.rnn.forward(self.embed[exp_word], exp_mask, h_0=h_0, delta_t=-1)
         hiddens = hiddens[:, -1] # remove all but the last layer
 
         # Let ruler = [0, n_batch, ..., (n_batch - 1) * n_batch]
@@ -133,30 +138,30 @@ class WordDecoder:
         ruler = n_batch * ruler
 
         # Use top hidden layer to compute probabilities
-        # TODO: Need dropout here
         def step(h_t, exp_word_t, exp_mask_t, *args):
             """
-            @param h_t:      T(n_batch, n_hidden), hidden block of last layer
+            @param h_t:      T(n_batch, n_hidden), hidden block of last level
             """
+            h_t = self.dropout(h_t)
             act_word = T.nnet.softmax(T.dot(h_t, self.W) + self.b)
             prob = T.flatten(act_word)[exp_word_t + ruler] + 1e-6
             log_prob = exp_mask_t * T.log(prob)
             return log_prob
         
-        probs, _ = theano.scan(fn=step, 
-                               sequences=[hiddens, exp_word, exp_mask],
-                               outputs_info=None,
-                               non_sequences=[self.W, self.b, ruler],
-                               strict=True)
+        probs, upd_dec = theano.scan(fn=step, 
+                                     sequences=[hiddens, exp_word, exp_mask],
+                                     outputs_info=None,
+                                     non_sequences=[self.W, self.b, ruler] + [self.dropout.switch],
+                                     strict=True)
 
         prob = T.sum(probs, axis=0)
-        return (hiddens[-1], prob), upd0
+        return (hiddens[-1], prob), concat_updates(upd_rnn, upd_dec)
 
 
 class SoftDecoder:
 
     def get_params(self):
-        return self.att.get_params() + self.rnn.get_params() + \
+        return self.attention.get_params() + self.rnn.get_params() + \
             self.encoder.get_params() + self.decoder.get_params() + \
             [self.embed]
 
@@ -168,13 +173,20 @@ class SoftDecoder:
         else:
             pdict = None
 
-        self.encoder = SentEncoder(pdict)
-        self.att = Attention(flags['n_hidden'], flags['n_hidden'], flags['n_context'], 
-                             'bilinear', 'softdec_att', pdict)
+        # Init dropout
+        # NOTE: If we're loading from an existing model,
+        # we need to copy random state _after_ the function is compiled.
+        self.pdict = pdict
+        self.dropout = Dropout(flags['dropout_prob'])
+
+        # Init slave models
+        self.encoder = SentEncoder(pdict, self.dropout)
+        self.attention = Attention(flags['n_hidden'], flags['n_hidden'], flags['n_context'], 
+                                   'bilinear', 'softdec_att', pdict)
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'] + flags['n_context'], flags['n_hidden'], 
-                              'softdec_rnn', pdict)
+                             self.dropout, 'softdec_rnn', pdict)
         self.embed = init_matrix_u((flags['n_vocab'], flags['n_embed']), 'embed', pdict)
-        self.decoder = WordDecoder(self.embed, pdict)
+        self.decoder = WordDecoder(self.embed, pdict, self.dropout)
 
     def save(self, file_):
         params = self.get_params()
@@ -182,8 +194,9 @@ class SoftDecoder:
         for p in params:
             assert not (p.name in pdict)
             pdict[p.name] = p.get_value()
-        pdict['__np_random_state__'] = np.random.get_state()
-        # TODO: theano random state
+        pdict['__np_random_state__'] = np.array(np.random.get_state(), dtype='object')
+        pdict['__theano_mrg_rstate__'] = np.array(self.dropout.rng.rstate, dtype='object')
+        pdict['__theano_mrg_state_updates__'] = np.array(self.dropout.rng.state_updates, dtype='object')
         np.savez(file_, **pdict)
 
     def train(self, X, Y):
@@ -198,7 +211,7 @@ class SoftDecoder:
         @param Y[1]:    Mask of (each sentence in) Y[0], shape=Y[0].shape, dtype=f32
                         0 if sentence does not exist (reached EOD)
         @param Y[2]:    Document-level mask of Y[0], shape=[*n_sent, *n_doc_batch]
-        @return: (update dict, loss)
+        @return: (loss, upd for validator, upd for trainer)
         """
         X[0] = self.embed[X[0]]
         
@@ -219,15 +232,15 @@ class SoftDecoder:
             @h_encs:    T(*n_doc_batch, *n_sent, n_hidden);   h_sentences  
             @*args:     non_sequences that theano should put into GPU 
             """ 
-            att_context = self.att.fn(h_encs, h_dec_tm1[-1]) # (n_doc_batch, n_context)
+            att_context = self.attention(h_encs, h_dec_tm1[-1]) # (n_doc_batch, n_context)
             inp = T.concatenate([x_dec_tm1, att_context], axis=1)
             c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, c_dec_tm1, h_dec_tm1) 
-            x_dec_t, prob = self.decoder.decode(h_dec_t, exp_sent, exp_mask) 
-            return h_dec_t, c_dec_t, x_dec_t, prob
+            (x_dec_t, prob), upd = self.decoder.decode(h_dec_t, exp_sent, exp_mask) 
+            return (h_dec_t, c_dec_t, x_dec_t, prob), upd
         
         batch_size = h_sentences.shape[0]
-        scan_params = self.rnn.get_params() + self.att.get_params() + self.decoder.get_params() \
-                    + [self.embed]
+        scan_params = self.rnn.get_params() + self.attention.get_params() + self.decoder.get_params() \
+                + [self.embed, self.dropout.switch] # OPTME: make it elegant
         [h_decs, _, _, probs], upd_dec = \
             theano.scan(fn = step,
                         sequences = Y,
@@ -237,11 +250,25 @@ class SoftDecoder:
                                         None],
                         non_sequences = [h_sentences] + scan_params,
                         strict=True)
-
-        # 
+        #
 
         loss = -T.sum(probs)
         grad = T.grad(-loss, self.get_params()) 
-        grad_updates = optimizer.optimize(flags['optimizer'], self.get_params(), grad, {}, flags)
-        return loss, grad_updates
+        rng_updates = concat_updates(upd_enc, upd_dec)
+        grad_updates = optimizer.optimize(flags['optimizer'], 
+                                          self.get_params(), 
+                                          grad, 
+                                          rng_updates,
+                                          flags)
+
+        return loss, rng_updates, grad_updates
+
+    def init_rng(self):
+        """
+        Restore theano rng state. Must be called _after_ compilation
+        """
+        if flags['load_npz'].strip() != "":
+            self.dropout.rng.rstate = self.pdict['__theano_mrg_rstate__']
+            for (su2, su1) in zip(self.dropout.rng.state_updates, self.pdict['__theano_mrg_state_updates__'][0]):
+                su2[0].set_value(su1[0].get_value())
 

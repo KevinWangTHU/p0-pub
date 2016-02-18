@@ -1,3 +1,8 @@
+# TODO
+# - Dump flags & training epoch when suspend / resume
+# - 
+
+
 import theano
 import theano.tensor as T
 import numpy as np
@@ -22,6 +27,8 @@ gflags.DEFINE_integer('n_doc_batch', 2, 'Documents per batch')
 gflags.DEFINE_integer('n_sent_batch', 3, 'Batch size of sentences in a document batch')
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
 
+gflags.DEFINE_float('dropout_prob', 0.5, 'Pr[drop_unit]')
+
 gflags.DEFINE_enum('optimizer', 'RMSProp2', ['AdaDelta', 'AdaGrad', 'RMSProp', 'RMSProp2', 'SGD'],
                    'as shown')
 gflags.DEFINE_float('lr', 1e-4, 'Learning rate for all optimizers')
@@ -29,7 +36,7 @@ gflags.DEFINE_float('opt_decay', 0.9, 'Decay rate for RMS.+/Ada.+')
 gflags.DEFINE_float('opt_momentum', 0.9, 'Momentum for SGD')
 
 gflags.DEFINE_string('dump_prefix', './test', 'as shown')
-gflags.DEFINE_string('load_npz', '', 'empty for starting from scratch')
+gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
 gflags.DEFINE_string('train_data', './data/test.train', 'path of training data')
 
 gflags.DEFINE_bool('test_value', True, 'Compute test value of theano')
@@ -39,6 +46,10 @@ flags = None
 
 
 def train(model, train_batches, valid_batches):
+
+    # TODO: REMOVEME
+    model.save('FUCKYOU.npz')
+
     # == Fix random state ==
     np.random.seed(7297)
 
@@ -68,18 +79,22 @@ def train(model, train_batches, valid_batches):
         Y_mask.tag.test_value = np.ones((n_sent, sent_len, doc_batch_size), dtype=np.float32)
         Y_mask_d.tag.test_value = np.ones((n_sent, doc_batch_size), dtype=np.float32)
 
-    loss, grad_updates = model.train([X_data, X_mask, X_pos, X_mask_d], [Y_data, Y_mask, Y_mask_d])
+    loss, valid_upd, train_upd = model.train([X_data, X_mask, X_pos, X_mask_d], [Y_data, Y_mask, Y_mask_d])
+
     train_batch = theano.function([X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d],
                                   loss,
-                                  updates=grad_updates,
-                                  on_unused_input='ignore', # FIXME
+                                  updates=train_upd,
+                                  on_unused_input='warn', # OPTME
                                   name='train_batch')
 
     valid_batch = theano.function([X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d],
                                   loss,
-                                  on_unused_input='ignore',
+                                  updates=valid_upd,
+                                  on_unused_input='warn',
                                   name='valid_batch')
-    
+
+    model.init_rng()
+  
     # == Train loop ==
     best_model_path = ""
     best_valid_loss = 1e100

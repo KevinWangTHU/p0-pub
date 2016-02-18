@@ -1,3 +1,5 @@
+# 2.18 3.20pm
+
 import nltk
 import re
 import os
@@ -5,9 +7,9 @@ import numpy as np
 
 import gflags
 
-gflags.DEFINE_string('root_path', '.', '', short_name='p')
-gflags.DEFINE_string('dump_prefix', './test', '', short_name='d')
-gflags.DEFINE_integer('max_vocab', -1, '', short_name='mv')
+gflags.DEFINE_string('root_path', './cnn/stories', '', short_name='p')
+gflags.DEFINE_string('dump_prefix', './', '', short_name='d')
+gflags.DEFINE_integer('max_vocab', 100000, 'Max vocabulary size (*including markers added by proc*)', short_name='mv')
 gflags.DEFINE_integer('max_tok_per_sent', -1, '', short_name='mtps')
 gflags.DEFINE_integer('max_para_per_doc', -1, '', short_name='mppd')
 
@@ -31,7 +33,7 @@ def process_text(file_path):
                 is_highlight = True
                 continue
             #
-            raw_sents = sent_tokenizer.tokenize(l)
+            raw_sents = sent_tokenizer.tokenize(l.decode('utf-8'))
             sents = []
             for sent in raw_sents:
                 tokens = nltk.tokenize.casual_tokenize(sent, preserve_case=False)
@@ -81,7 +83,9 @@ def main():
     #
     stories = []
     wdict = {}
-    for story in files:
+    len_files = len(files)
+    for i, story in enumerate(files):
+        print >>sys.stderr, "\r%d/%d stories loaded" % (i, len_files),
         text, highlight = process_text(story)
         update_wdict(text, wdict)
         update_wdict(highlight, wdict)
@@ -89,8 +93,8 @@ def main():
     #
     word_freqs = wdict.items()
     word_freqs.sort(key=lambda x: -x[1])
-    print >>sys.stderr, "%d words of %d included" % (flags.max_vocab + 2, len(wdict))
-    word_freqs = [(x, i + 2) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab]
+    print >>sys.stderr, "\n%d words of %d (w/o markers) included" % (flags.max_vocab - 2, len(wdict))
+    word_freqs = [(x, i + 2) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab - 2]
     wdict = dict(word_freqs)
     wdict["%%unk%%"] = 0
     wdict["%%para_end%%"] = 1
@@ -103,7 +107,7 @@ def main():
     #
     print >>sys.stderr, "document updated"
     #
-    print wdict, stories[0]
+    # print wdict, stories[0]
     with open(dump_prefix + '.dict', 'wb') as fd:
         cPickle.dump(wdict, fd)
     with open(dump_prefix + '.train', 'wb') as ft:
