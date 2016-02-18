@@ -58,8 +58,6 @@ class Dropout:
                                     mask * data,
                                     prob * data)
 
-    # TODO: dump & restore parameters
-
 
 def concat_updates(upd0, upd1):
     """

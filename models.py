@@ -1,5 +1,3 @@
-# TODO: Test deploy
-
 import sys
 import theano
 import theano.tensor as T
@@ -255,13 +253,7 @@ class SoftDecoder:
         loss = -T.sum(probs)
         grad = T.grad(-loss, self.get_params()) 
         rng_updates = concat_updates(upd_enc, upd_dec)
-        grad_updates = optimizer.optimize(flags['optimizer'], 
-                                          self.get_params(), 
-                                          grad, 
-                                          rng_updates,
-                                          flags)
-
-        return loss, rng_updates, grad_updates
+        return self.get_params(), loss, grad, rng_updates
 
     def init_rng(self):
         """

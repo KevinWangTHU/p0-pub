@@ -83,7 +83,7 @@ def AdaDelta(params, grads, updates, flags):
     return updates
 
 
-def optimize(method, params, grads, updates, flags):
+def optimize(params, updates, flags):
     optimizers = {'SGD': SGD,
                   'AdaGrad': AdaGrad,
                   'RMSProp': RMSProp,
@@ -91,4 +91,7 @@ def optimize(method, params, grads, updates, flags):
                   'AdaDelta': AdaDelta}
     if updates == {}: # Updates should always be OrderedDict
         updates = collections.OrderedDict()
-    return optimizers[method](params, grads, updates, flags)
+    grads = [theano.shared(p.get_value() * numpy.asarray(0.0, dtype='float32'),
+                           name=p.name+'_grad') \
+             for p in params]
+    return grads, optimizers[flags['optimizer']](params, grads, updates, flags)
