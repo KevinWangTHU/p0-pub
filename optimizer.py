@@ -9,8 +9,7 @@ import collections
 # updates: theano update dictionary
 
 # lr, momentum: packed theano variable 
-def SGD(params, grads, updates, flags):
-    lr = flags['lr']
+def SGD(params, grads, lr, updates, flags):
     momentum = flags['opt_momentum']
     grad_m = [theano.shared(numpy.zeros(param.get_value(borrow=True).shape, 
                                         dtype=theano.config.floatX)) \
@@ -21,8 +20,7 @@ def SGD(params, grads, updates, flags):
         updates[v] = v + lr * n_gm
     return updates
 
-def AdaGrad(params, grads, updates, flags):
-    lr0 = flags['lr']
+def AdaGrad(params, grads, lr0, updates, flags):
     padding = flags['opt_padding'] if 'opt_padding' in flags else 1e-4
     sq_grads = [theano.shared(numpy.zeros(param.get_value(borrow=True).shape, 
                                         dtype=theano.config.floatX)) \
@@ -33,8 +31,7 @@ def AdaGrad(params, grads, updates, flags):
         updates[value] = value + lr0 * grad / T.sqrt(n_sq_grad + padding)
     return updates
 
-def RMSProp(params, grads, updates, flags):
-    lr0 = flags['lr']
+def RMSProp(params, grads, lr0, updates, flags):
     decay = flags['opt_decay']
     padding = flags['opt_padding'] if 'opt_padding' in flags else 1e-5
     sq_grads = [theano.shared(numpy.zeros(param.get_value(borrow=True).shape, 
@@ -46,8 +43,7 @@ def RMSProp(params, grads, updates, flags):
         updates[value] = value + lr0 * grad / T.sqrt(n_sq_grad + padding)
     return updates
 
-def RMSProp2(params, grads, updates, flags):
-    lr = flags['lr']
+def RMSProp2(params, grads, lr, updates, flags):
     decay = flags['opt_decay']
     pad = flags['opt_padding'] if 'opt_padding' in flags else 1e-5
     m_grads = [theano.shared(numpy.zeros(param.get_value(borrow=True).shape, 
@@ -64,8 +60,7 @@ def RMSProp2(params, grads, updates, flags):
     return updates
 
 
-def AdaDelta(params, grads, updates, flags):
-    lr = flags['lr'] if 'lr' in flags else 1e-5
+def AdaDelta(params, grads, lr, updates, flags):
     decay = flags['opt_decay']
     pad = flags['opt_padding'] if 'opt_padding' in flags else 1e-5
     m_grad2s = [theano.shared(numpy.zeros(param.get_value(borrow=True).shape, 
@@ -94,4 +89,5 @@ def optimize(params, updates, flags):
     grads = [theano.shared(p.get_value() * numpy.asarray(0.0, dtype='float32'),
                            name=p.name+'_grad') \
              for p in params]
-    return grads, optimizers[flags['optimizer']](params, grads, updates, flags)
+    lr = T.fscalar('opt_lr')
+    return lr, grads, optimizers[flags['optimizer']](params, grads, lr, updates, flags)

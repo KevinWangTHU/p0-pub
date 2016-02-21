@@ -24,8 +24,6 @@ def build_sent_batch(sentences_annotated, n_sent_batch, n_docs, max_doc_len):
     sum_sent_len = 0
     doc_sent_pos = np.zeros((max_doc_len, n_docs), dtype=np.int64)
     #
-    sentences_annotated.sort(key=operator.itemgetter(0))
-    #
     for cur_batch_s in xrange(0, len(sentences_annotated), n_sent_batch):
         cur_sents = sentences_annotated[cur_batch_s: cur_batch_s + n_sent_batch]
         # all_sent_list
@@ -55,22 +53,36 @@ def build_input(docs, flags):
     """
     @return:    [(id, (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
                        hl_sent_data, hl_sent_mask, hl_doc_mask)) for each batch]
+                if flags['simplernn'] == True, 
+                    all sentences will be concatenated in a document, and
+                    concated_sent[:, i] corresponds to the ith document.
     """
 
-    # Sort documents by number of sentences
     n_docs = []
-    for doc, highlight in docs:
-        n_sent = sum([len(para) for para in doc])
-        n_docs.append((n_sent, doc, highlight))
-    n_docs.sort(key=lambda x: x[0])
-    n_docs = [x[1:] for x in n_docs]
+    if not flags['simplernn']:
+        # Sort documents by number of sentences
+        for doc, highlight in docs:
+            n_sent = sum([len(para) for para in doc])
+            n_docs.append((n_sent, doc, highlight))
+        n_docs.sort(key=lambda x: x[0])
+        n_docs = [x[1:] for x in n_docs]
+    else:
+        # Concatenate all paragraphs & sentences (keeping the list hierarchy), 
+        # and sort wrt number of words.
+        for doc, highlight in docs:
+            doc = [[concat(concat(doc))]]
+            highlight = [[concat(concat(highlight))]]
+            n_word = len(doc[0][0])
+            n_docs.append((n_word, doc, highlight))
+        n_docs.sort(key=lambda x: x[0])
+        n_docs = [x[1:] for x in n_docs]            
 
     # Build batches
     batches = []
     n_doc_batch = flags['n_doc_batch']
     n_sent_batch = flags['n_sent_batch']
-    for i in xrange(0, len(docs), n_doc_batch):
-        cur_docs = docs[i: i+n_doc_batch]
+    for i in xrange(0, len(n_docs), n_doc_batch):
+        cur_docs = n_docs[i: i+n_doc_batch]
 
         # remove paragraph structure that is not yet utilized 
         cur_docs = [(concat(p), concat(h)) for p, h in cur_docs]
@@ -88,8 +100,13 @@ def build_input(docs, flags):
                                for s_id, sent in enumerate(doc)]
                               for d_id, (doc, _) in enumerate(cur_docs)]
         all_sent_annotated = concat(cur_docs_annotated)
-        concated_sent, concated_mask, doc_sent_pos = build_sent_batch(all_sent_annotated, n_sent_batch, 
-                                                                      len(cur_docs), max_doc_len)
+        if not flags['simplernn']:
+            all_sent_annotated.sort(key=operator.itemgetter(0))
+            concated_sent, concated_mask, doc_sent_pos = build_sent_batch(
+                all_sent_annotated, n_sent_batch, len(cur_docs), max_doc_len)
+        else:
+            concated_sent, concated_mask, doc_sent_pos = build_sent_batch(
+                all_sent_annotated, len(cur_docs), len(cur_docs), max_doc_len)
         
         # Highlight
         # - mask

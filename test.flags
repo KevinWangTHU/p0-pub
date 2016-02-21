@@ -1,0 +1,10 @@
+--n_embed=13
+--n_hidden=17
+--n_context=3
+--n_vocab=100
+--n_layers=2
+--n_doc_batch=20
+--n_sent_batch=20
+--n_epochs=1
+--simplernn
+--train_data=./data/test3.train

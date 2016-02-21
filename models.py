@@ -155,6 +155,50 @@ class WordDecoder:
         prob = T.sum(probs, axis=0)
         return (hiddens[-1], prob), concat_updates(upd_rnn, upd_dec)
 
+    def search(self, h_0):
+        """
+        @param h_0:     np.array of (n_layers, 1, n_hidden)
+        @return:        list of best beams [(log-likelihood, last H, token list)] 
+        """
+
+        # == Compile theano function rnn_next == 
+        def build_next():
+            c_t = T.ftensor3('c_t')
+            h_t = T.ftensor3('h_t')
+            x_t = T.fmatrix('x_t')
+            xm_t = T.fvector('xm_t')
+            c_tp1, h_tp1 = self.rnn.step(x_t, xm_t, c_t, h_t)
+            p_word_t = T.nnet.softmax(T.dot(h_tp1[-1], self.W), self.b)
+            return theano.function([c_t, h_t, x_t, xm_t],
+                                   [c_tp1, h_tp1, p_word_t])
+
+        rnn_next = build_next()
+        
+        # == Beam Search ==
+        c_0 = 0.0 * h_0
+        x_0 = np.zeros((1, flags['n_embed'])).astype('f')
+        que = [(0.0, c_0, h_0, x_0, [])]
+        final_beams = []
+        for i in xrange(flags['n_max_sent']):
+            nque = []
+            for log_prob, c_t, h_t, x_t, cur_sent in que:
+                c_tp1, h_tp1, prob_t = rnn_next(c_t, h_t, x_t, [1.])
+                prob_t = prob_t.flatten() # (1, n_vocab) -> (n_vocab,)
+                tokens_t = np.argpartition(prob_t, flags['n_beam'])[:flags['n_beam']] # (n_beam,)
+                for tok in tokens_t:
+                    if tok == self.eos: # TODO
+                        final_beams.append((log_prob, c_t, h_t, x_t, cur_sent))
+                    else:
+                        log_prob_tp1 = log_prob + prob_t[tok]
+                        x_tp1 = self.embed[tok]
+                        nque.append((log_prob_tp1, c_tp1, h_tp1, x_tp1, cur_sent + [tok]))
+            #
+            que = sorted(nque, key=lambda x: x[0])[:flags['n_beam']]
+
+        final_beams += que
+        final_beams = sorted(final_beams, key=lambda x: x[0])[:flags['n_beam']]
+        return [(b[0], b[2], b[4]) for b in final_beams]
+
 
 class SoftDecoder:
 

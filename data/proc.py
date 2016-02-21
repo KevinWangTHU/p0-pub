@@ -1,3 +1,7 @@
+#wdict["%%unk%%"] = 0
+#wdict["%%para_end%%"] = 1
+#wdict["%%doc_end%%"] = 2
+
 import nltk
 import re
 import os
@@ -6,7 +10,7 @@ import numpy as np
 import gflags
 
 gflags.DEFINE_string('root_path', './cnn/stories', 'directory containing all stories', short_name='p')
-gflags.DEFINE_string('dump_prefix', './100k', 'prefix of dict/data to be dumped', short_name='d')
+gflags.DEFINE_string('dump_prefix', './100k3', 'prefix of dict/data to be dumped', short_name='d')
 gflags.DEFINE_integer('max_vocab', 100000, 'Max vocabulary size (including markers added by this script)', short_name='mv')
 gflags.DEFINE_integer('max_tokens_per_sentence', -1, '', short_name='mtps')
 gflags.DEFINE_integer('max_paragraphs_per_document', -1, '', short_name='mppd')
@@ -63,6 +67,7 @@ def update_doc(doc, wdict):
         n_sents = [[wdict[t] if t in wdict else 0 # 0<-%%unk%%
                     for t in sent] for sent in para] + [[1]] # 1<-%%para_end%%
         ndoc.append(n_sents)
+    ndoc.append([[2]]) # 2<-%%doc_end%%
     return ndoc
 
 
@@ -99,11 +104,12 @@ def main():
     # Remove infrequent words & add markers
     word_freqs = wdict.items()
     word_freqs.sort(key=lambda x: -x[1])
-    print >>sys.stderr, "%d words of %d (w/o markers) included" % (flags.max_vocab - 2, len(wdict))
-    word_freqs = [(x, i + 2) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab - 2]
+    print >>sys.stderr, "%d words of %d (w/o markers) included" % (flags.max_vocab - 3, len(wdict))
+    word_freqs = [(x, i + 3) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab - 3]
     wdict = dict(word_freqs)
     wdict["%%unk%%"] = 0
     wdict["%%para_end%%"] = 1
+    wdict["%%doc_end%%"] = 2
     n_vocab = len(wdict)
 
     # Token->ID

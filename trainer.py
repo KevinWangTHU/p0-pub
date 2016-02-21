@@ -1,6 +1,3 @@
-# TODO
-# - Test deploy
-
 import theano
 import theano.tensor as T
 import numpy as np
@@ -17,6 +14,7 @@ from collections import OrderedDict
 
 import optimizer
 import models
+import test_model
 import dataproc
 from util import *
 
@@ -25,10 +23,15 @@ gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
 gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
 gflags.DEFINE_integer('n_context', 200, 'Dimension of context layer')
 gflags.DEFINE_integer('n_vocab', 100000, 'as shown')
-gflags.DEFINE_integer('n_layers', 1, 'Number of RNN layers')
+gflags.DEFINE_integer('n_layers', 1, 'Number of RNN layers') # n_layers=1 causes CE in theano 0.7; fixed in dev version
 gflags.DEFINE_integer('n_doc_batch', 10, 'Documents per batch')
 gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document batch')
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
+
+gflags.DEFINE_integer('n_beam', 5, 'Number of candidates in beam search')
+gflags.DEFINE_integer('n_max_sent', 30, 'Maximum sentence length allowed in beam search')
+
+gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
 
 gflags.DEFINE_float('dropout_prob', 0.5, 'Pr[drop_unit]')
 
@@ -82,13 +85,13 @@ def compile_functions(model):
 
     params, loss, grad, rng_updates = \
             model.train([X_data, X_mask, X_pos, X_mask_d], [Y_data, Y_mask, Y_mask_d])
-    grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
+    lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
 #    params = model.get_params()
 #    loss = sum([T.mean(p) for p in params])
 #    grad = T.grad(-loss, params)
 #    rng_updates = theano.OrderedUpdates()
-#    grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
+#    lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
     get_loss = theano.function([X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d],
                                loss,
@@ -96,7 +99,7 @@ def compile_functions(model):
                                on_unused_input = 'warn',
                                name = 'get_loss')
 
-    update_params = theano.function([], [],
+    update_params = theano.function([lr], [],
                                     updates = opt_updates,
                                     name = 'do_optimize')
 
@@ -111,7 +114,12 @@ def train(train_batches, valid_batches):
 
     # == Compile ==
     if flags['compile']: 
-        model = models.SoftDecoder()
+        #
+        if flags['simplernn']:
+            model = test_model.SimpleRNN(flags)
+        else:
+            model = models.SoftDecoder()
+        #
         dropout_switch = model.dropout.switch
         get_loss, update_params = compile_functions(model)
         if flags['func_output']:
@@ -134,9 +142,9 @@ def train(train_batches, valid_batches):
         v_loss = []
         dropout_switch.set_value(1.0) # 1{use_dropout}
         for batch_id, b in train_batches:
-            # Hack for memory leak (?)
-            # FIXME: The random state may be affected
+            #
             while True: 
+                # Hack for memory shortage. NOTE: The random state may be affected
                 try:
                     b_loss = get_loss(*b)
                 except Exception as e:
@@ -146,7 +154,10 @@ def train(train_batches, valid_batches):
                     else:
                         raise e
                 break
-            update_params()
+            #
+            n_doc_batch = b[2].shape[1]
+            update_params(float(flags['lr'] * n_doc_batch))
+            #
             t_loss.append(b_loss)
             log_info({'type': 'batch', 'id': batch_id, 'loss': float(np.mean(t_loss))})
 
@@ -157,7 +168,7 @@ def train(train_batches, valid_batches):
                     b_loss = get_loss(*b)
                 except Exception as e:
                     if str(e.args).find('llocation') != -1:
-                        log_info({'type': 'valid_MLE', 'id': batch_id, 'value': str(e.args)})
+                        log_info({'type': 'valid_MLE', 'id': batch_id, 'value': str(e.args), 'magic': gc.collect() + gc.collect()})
                         continue
                     else:
                         raise e
