@@ -1,13 +1,12 @@
 # TODO
 # - Test deploy
-# [TOTEST] "-" parameter for dump_prefix
-
 
 import theano
 import theano.tensor as T
 import numpy as np
 import gflags
 
+import gc
 import os
 import shutil
 import sys
@@ -22,29 +21,29 @@ import dataproc
 from util import *
 
 
-gflags.DEFINE_integer('n_embed', 20, 'Dimension of word embedding')
-gflags.DEFINE_integer('n_hidden', 30, 'Dimension of hidden layer')
-gflags.DEFINE_integer('n_context', 25, 'Dimension of hidden layer')
-gflags.DEFINE_integer('n_vocab', 502, 'as shown')
-gflags.DEFINE_integer('n_layers', 2, 'Number of RNN layers')
-gflags.DEFINE_integer('n_doc_batch', 2, 'Documents per batch')
-gflags.DEFINE_integer('n_sent_batch', 3, 'Batch size of sentences in a document batch')
+gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
+gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
+gflags.DEFINE_integer('n_context', 200, 'Dimension of context layer')
+gflags.DEFINE_integer('n_vocab', 100000, 'as shown')
+gflags.DEFINE_integer('n_layers', 1, 'Number of RNN layers')
+gflags.DEFINE_integer('n_doc_batch', 10, 'Documents per batch')
+gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document batch')
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
 
 gflags.DEFINE_float('dropout_prob', 0.5, 'Pr[drop_unit]')
 
 gflags.DEFINE_enum('optimizer', 'RMSProp2', ['AdaDelta', 'AdaGrad', 'RMSProp', 'RMSProp2', 'SGD'],
                    'as shown')
-gflags.DEFINE_float('lr', 1e-4, 'Learning rate for all optimizers')
+gflags.DEFINE_float('lr', 1e-5, 'Learning rate for all optimizers')
 gflags.DEFINE_float('opt_decay', 0.9, 'Decay rate for RMS.+/Ada.+')
 gflags.DEFINE_float('opt_momentum', 0.9, 'Momentum for SGD')
 
 gflags.DEFINE_bool('compile', True, 'Recompile theano functions')
-gflags.DEFINE_bool('func_output', True, 'Dump function if compiled')
+gflags.DEFINE_bool('func_output', False, 'Dump function if compiled')
 gflags.DEFINE_string('func_input', '', 'Use compiled function if valid')
-gflags.DEFINE_string('dump_prefix', './test', 'as shown; - for autocreate')
+gflags.DEFINE_string('dump_prefix', '-', 'as shown; - for autocreate')
 gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
-gflags.DEFINE_string('train_data', './data/test.train', 'path of training data')
+gflags.DEFINE_string('train_data', './data/100k.train', 'path of training data')
 
 gflags.DEFINE_bool('test_value', False, 'Compute test value of theano') # Issue with MRG
 
@@ -125,6 +124,7 @@ def train(train_batches, valid_batches):
             dropout_switch, get_loss, update_params = cPickle.load(fin)
     
     # == Train loop ==
+
     best_model_path = ""
     best_valid_loss = 1e100
     for epoch in xrange(flags['n_epochs']):
@@ -134,14 +134,34 @@ def train(train_batches, valid_batches):
         v_loss = []
         dropout_switch.set_value(1.0) # 1{use_dropout}
         for batch_id, b in train_batches:
-            b_loss = get_loss(*b)
+            # Hack for memory leak (?)
+            # FIXME: The random state may be affected
+            while True: 
+                try:
+                    b_loss = get_loss(*b)
+                except Exception as e:
+                    if str(e.args).find('allocat') != -1:
+                        log_info({'type': 'batch_MLE', 'id': batch_id, 'value': str(e.args), 'magic': gc.collect() + gc.collect()})
+                        continue
+                    else:
+                        raise e
+                break
             update_params()
             t_loss.append(b_loss)
             log_info({'type': 'batch', 'id': batch_id, 'loss': float(np.mean(t_loss))})
 
         dropout_switch.set_value(0.0) 
         for batch_id, b in valid_batches:
-            b_loss = get_loss(*b)
+            while True:
+                try:
+                    b_loss = get_loss(*b)
+                except Exception as e:
+                    if str(e.args).find('llocation') != -1:
+                        log_info({'type': 'valid_MLE', 'id': batch_id, 'value': str(e.args)})
+                        continue
+                    else:
+                        raise e
+                break
             v_loss.append(b_loss)
             log_info({'type': 'valid', 'id': batch_id, 'loss': float(np.mean(v_loss))})
 
@@ -156,6 +176,19 @@ def train(train_batches, valid_batches):
 
     shutil.copy(best_model_path, flags['dump_prefix'] + '-best.npz')
     log_info({'type': 'training_finished'})
+
+
+def log_setup():
+    import coloredlogs
+    coloredlogs.install(show_hostname=False, show_name=False)
+    fmt = '%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s'
+    datefmt = '%a, %d %b %Y %H:%M:%S'
+    logging.basicConfig(level=logging.DEBUG,
+                        format=fmt,
+                        datefmt=datefmt)
+    fh = logging.FileHandler(flags['dump_prefix'] + '.log')
+    fh.setFormatter(logging.Formatter(fmt, datefmt))
+    logging.getLogger().addHandler(fh)
     
 
 def main():
@@ -172,6 +205,7 @@ def main():
         os.system("mkdir -p ./dump/%s/" % now)
         flags['dump_prefix'] = "./dump/%s/f" % now
 
+    log_setup()
     log_info(flags)
     #
     train_batches, valid_batches = dataproc.load_data(flags)
@@ -179,10 +213,4 @@ def main():
 
 
 if __name__ == '__main__':
-    import coloredlogs
-    coloredlogs.install(show_hostname=False, show_name=False)
-    logging.basicConfig(
-            level=logging.DEBUG,
-            format='%(asctime)s %(filename)s[line:%(lineno)d] %(levelname)s %(message)s',
-            datefmt='%a, %d %b %Y %H:%M:%S')
     main()
