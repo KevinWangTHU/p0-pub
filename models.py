@@ -113,6 +113,7 @@ class WordDecoder:
         self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
         self.b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
         self.dropout = dropout
+        self.eos = 2 if flags['simplernn'] else 1
     
     def decode(self, h_0, exp_word, exp_mask):
         """
@@ -161,18 +162,18 @@ class WordDecoder:
         @return:        list of best beams [(log-likelihood, last H, token list)] 
         """
 
-        # == Compile theano function rnn_next == 
-        def build_next():
+        def compile_next():
             c_t = T.ftensor3('c_t')
             h_t = T.ftensor3('h_t')
             x_t = T.fmatrix('x_t')
             xm_t = T.fvector('xm_t')
             c_tp1, h_tp1 = self.rnn.step(x_t, xm_t, c_t, h_t)
-            p_word_t = T.nnet.softmax(T.dot(h_tp1[-1], self.W), self.b)
+            p_word_t = T.log(T.nnet.softmax(T.dot(h_tp1[-1], self.W) + self.b))
             return theano.function([c_t, h_t, x_t, xm_t],
                                    [c_tp1, h_tp1, p_word_t])
 
-        rnn_next = build_next()
+        if not hasattr(self, 'rnn_next'):
+            self.rnn_next = compile_next()
         
         # == Beam Search ==
         c_0 = 0.0 * h_0
@@ -182,21 +183,22 @@ class WordDecoder:
         for i in xrange(flags['n_max_sent']):
             nque = []
             for log_prob, c_t, h_t, x_t, cur_sent in que:
-                c_tp1, h_tp1, prob_t = rnn_next(c_t, h_t, x_t, [1.])
-                prob_t = prob_t.flatten() # (1, n_vocab) -> (n_vocab,)
-                tokens_t = np.argpartition(prob_t, flags['n_beam'])[:flags['n_beam']] # (n_beam,)
+                c_tp1, h_tp1, p_word_t = self.rnn_next(c_t, h_t, x_t, [1.])
+                p_word_t = p_word_t.flatten() # (1, n_vocab) -> (n_vocab,)
+                tokens_t = np.argpartition(p_word_t, flags['n_beam'])[:flags['n_beam']] # (n_beam,)
                 for tok in tokens_t:
-                    if tok == self.eos: # TODO
-                        final_beams.append((log_prob, c_t, h_t, x_t, cur_sent))
+                    log_prob_tp1 = log_prob + p_word_t[tok]
+                    x_tp1 = self.embed.get_value(borrow=True)[tok].reshape((1, flags['n_embed']))
+                    node = (log_prob_tp1, c_tp1, h_tp1, x_tp1, cur_sent + [tok])
+                    if tok == self.eos: 
+                        final_beams.append(node)
                     else:
-                        log_prob_tp1 = log_prob + prob_t[tok]
-                        x_tp1 = self.embed[tok]
-                        nque.append((log_prob_tp1, c_tp1, h_tp1, x_tp1, cur_sent + [tok]))
+                        nque.append(node)
             #
-            que = sorted(nque, key=lambda x: x[0])[:flags['n_beam']]
+            que = sorted(nque, key=lambda x: -x[0])[:flags['n_beam']]
 
         final_beams += que
-        final_beams = sorted(final_beams, key=lambda x: x[0])[:flags['n_beam']]
+        final_beams = sorted(final_beams, key=lambda x: -x[0])[:flags['n_beam']]
         return [(b[0], b[2], b[4]) for b in final_beams]
 
 

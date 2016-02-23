@@ -1,6 +1,7 @@
 import theano
 import theano.tensor as T
 import numpy as np
+from nltk.translate import bleu_score
 import gflags
 
 import gc
@@ -14,10 +15,14 @@ from collections import OrderedDict
 
 import optimizer
 import models
-import test_model
+import simple_model
 import dataproc
 from util import *
 
+
+gflags.DEFINE_enum('mode', 'train', ['train', 'test'], 'as shown')
+gflags.DEFINE_bool('dump_highlights', True, 'dump generated highlights in test mode')
+gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
 
 gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
 gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
@@ -27,12 +32,8 @@ gflags.DEFINE_integer('n_layers', 1, 'Number of RNN layers') # n_layers=1 causes
 gflags.DEFINE_integer('n_doc_batch', 10, 'Documents per batch')
 gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document batch')
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
-
 gflags.DEFINE_integer('n_beam', 5, 'Number of candidates in beam search')
 gflags.DEFINE_integer('n_max_sent', 30, 'Maximum sentence length allowed in beam search')
-
-gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
-
 gflags.DEFINE_float('dropout_prob', 0.5, 'Pr[drop_unit]')
 
 gflags.DEFINE_enum('optimizer', 'RMSProp2', ['AdaDelta', 'AdaGrad', 'RMSProp', 'RMSProp2', 'SGD'],
@@ -46,8 +47,7 @@ gflags.DEFINE_bool('func_output', False, 'Dump function if compiled')
 gflags.DEFINE_string('func_input', '', 'Use compiled function if valid')
 gflags.DEFINE_string('dump_prefix', '-', 'as shown; - for autocreate')
 gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
-gflags.DEFINE_string('train_data', './data/100k.train', 'path of training data')
-
+gflags.DEFINE_string('train_data', './data/100k', 'path of training data')
 gflags.DEFINE_bool('test_value', False, 'Compute test value of theano') # Issue with MRG
 
 
@@ -108,18 +108,44 @@ def compile_functions(model):
     return get_loss, update_params
 
 
+def test_model(model, test_batches):
+    bleus = []
+    generated_highlights = []
+    for batch_id, b, data_hlts in test_batches:
+        model_hlts = model.test(b[0:4]) # ~ [[(float(LogP), [[int] * n_hlts])] * n_beam] * n_batch
+        model_hlts = [hl[0][1] for hl in model_hlts]  # Remove all but the most probable text
+        generated_highlights += model_hlts
+        for model_hlt, data_hlt in zip(model_hlts, data_hlts):
+            # BLEU for concatenated highlights
+            bleu = bleu_score.bleu([concat(data_hlt)], concat(model_hlt), weights=[0.25]*4)
+            bleus.append(bleu)
+        log_info({'type': 'test_batch', 'bleu': np.mean(bleus)})
+    
+    if flags['dump_highlights']:
+        with open(flags['train_data'] + '.dict') as fin:
+            wdict = cPickle.load(fin)
+        words = dict([(i, w) for w, i in wdict.items()])
+        generated_highlights = [[[words[i] for i in hlt]
+                                 for hlt in doc_hlt]
+                                for doc_hlt in generated_highlights]
+        with open(flags['dump_prefix'] + ".highlights", "w") as fout:
+            cPickle.dump(generated_highlights, fout)
+
+
+def new_model():
+    if flags['simplernn']:
+        return simple_model.SimpleRNN(flags)
+    else:
+        return models.SoftDecoder()
+
+
 def train(train_batches, valid_batches):
     # == Fix random state & compile ==
     np.random.seed(7297)
 
     # == Compile ==
     if flags['compile']: 
-        #
-        if flags['simplernn']:
-            model = test_model.SimpleRNN(flags)
-        else:
-            model = models.SoftDecoder()
-        #
+        model = new_model()
         dropout_switch = model.dropout.switch
         get_loss, update_params = compile_functions(model)
         if flags['func_output']:
@@ -141,7 +167,7 @@ def train(train_batches, valid_batches):
         t_loss = []
         v_loss = []
         dropout_switch.set_value(1.0) # 1{use_dropout}
-        for batch_id, b in train_batches:
+        for batch_id, b, _ in train_batches:
             #
             while True: 
                 # Hack for memory shortage. NOTE: The random state may be affected
@@ -162,7 +188,7 @@ def train(train_batches, valid_batches):
             log_info({'type': 'batch', 'id': batch_id, 'loss': float(np.mean(t_loss))})
 
         dropout_switch.set_value(0.0) 
-        for batch_id, b in valid_batches:
+        for batch_id, b, _ in valid_batches:
             while True:
                 try:
                     b_loss = get_loss(*b)
@@ -219,8 +245,12 @@ def main():
     log_setup()
     log_info(flags)
     #
-    train_batches, valid_batches = dataproc.load_data(flags)
-    train(train_batches, valid_batches)
+    if flags['mode'] == 'train':
+        train_batches, valid_batches = dataproc.load_data(flags)
+        train(train_batches, valid_batches)
+    else:
+        test_batches = dataproc.load_test_data(flags)
+        test_model(new_model(), test_batches)
 
 
 if __name__ == '__main__':

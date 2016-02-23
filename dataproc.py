@@ -51,8 +51,11 @@ def build_sent_batch(sentences_annotated, n_sent_batch, n_docs, max_doc_len):
 
 def build_input(docs, flags):
     """
-    @return:    [(id, (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
-                       hl_sent_data, hl_sent_mask, hl_doc_mask)) for each batch]
+    @return:    [(id, 
+                  (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
+                   hl_sent_data, hl_sent_mask, hl_doc_mask),
+                  original highlights ([[[int] for highlight in doc] for doc in batch]))
+                 for each batch]
                 if flags['simplernn'] == True, 
                     all sentences will be concatenated in a document, and
                     concated_sent[:, i] corresponds to the ith document.
@@ -125,19 +128,27 @@ def build_input(docs, flags):
                     hl_sent_data[hl_id, tok_id, doc_id] = token
                     hl_sent_mask[hl_id, tok_id, doc_id] = 1.
         
-        batches.append((concated_sent, concated_mask, doc_sent_pos, doc_mask,
-                        hl_sent_data, hl_sent_mask, hl_doc_mask))
+        train_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
+                       hl_sent_data, hl_sent_mask, hl_doc_mask)
+        highlights = [h for d, h in cur_docs]
+        batches.append((i, train_input, highlights))
 
     log_info({'type': 'data', 'value': 'data loaded'})
-    return list(enumerate(batches))
+    return batches
 
 
 def load_data(flags):
     all_docs = None
-    with open(flags['train_data']) as fin:
+    with open(flags['train_data'] + '.train') as fin:
         all_docs = cPickle.load(fin)
     np.random.seed(7297)
     np.random.shuffle(all_docs)
     split = len(all_docs) * 4 / 5
     return build_input(all_docs[:split], flags), \
            build_input(all_docs[split:], flags)
+
+
+def load_test_data(flags):
+    with open(flags['train_data'] + '.train') as fin:
+        all_docs = cPickle.load(fin)
+    return build_input(all_docs, flags)
