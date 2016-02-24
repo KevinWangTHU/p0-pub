@@ -51,9 +51,17 @@ class Dropout:
         self.switch = theano.shared(np.array(1.0).astype('f'))
         self.rng = MRG_RandomStreams(seed=7297)
 
-    def __call__(self, data):
+    def prep_mask(self, shape):
+        return self.rng.binomial(
+                size=shape, n=1, p=self.prob, dtype='float32',
+                nstreams=20*200*4)
+        # Reasonable value of nstreams
+        # 800*20*24=368KB. Called in scan => len(n_sent)<50, acceptable
+
+    def __call__(self, data, mask=None):
         prob = T.cast(1 - self.prob, dtype='float32')
-        mask = self.rng.binomial(size=data.shape, n=1, p=prob, dtype='float32')
+        if not mask:
+            mask = self.rng.binomial(size=data.shape, n=1, p=prob, dtype='float32')
         return theano.ifelse.ifelse(T.lt(0.1, self.switch),
                                     mask * data,
                                     prob * data)
@@ -62,12 +70,6 @@ class Dropout:
 def concat_updates(upd0, upd1):
     """
     Concatenate consecutive updates.
-    @param upd0, upd1: OrderedUpdates.
-    #                   computation graphs related to upd0 and upd1 should be 
-    #                   dependent.
-    @return:           OrderedUpdates
     天下本无事, 庸人自扰之.
     """
     return upd0 + upd1
-#    ret = [(key1, theano.clone(upd1[key1], replace=upd0)) for key1 in upd1]
-#    return theano.OrderedUpdates(ret)

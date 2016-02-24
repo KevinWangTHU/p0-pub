@@ -137,21 +137,24 @@ class WordDecoder:
         ruler = n_batch * ruler
 
         # Use top hidden layer to compute probabilities
-        def step(h_t, exp_word_t, exp_mask_t, *args):
+        def step(h_t, exp_word_t, exp_mask_t, dropout_mask, *args):
             """
             @param h_t:      T(n_batch, n_hidden), hidden block of last level
             """
-            h_t = self.dropout(h_t)
+            h_t = self.dropout(h_t, dropout_mask)
             act_word = T.nnet.softmax(T.dot(h_t, self.W) + self.b)
             prob = T.flatten(act_word)[exp_word_t + ruler] + 1e-6
             log_prob = exp_mask_t * T.log(prob)
             return log_prob
         
-        probs, upd_dec = theano.scan(fn=step, 
-                                     sequences=[hiddens, exp_word, exp_mask],
-                                     outputs_info=None,
-                                     non_sequences=[self.W, self.b, ruler] + [self.dropout.switch],
-                                     strict=True)
+        dropout_masks = self.dropout.prep_mask(
+                (hiddens.shape[0], hiddens.shape[1], hiddens.shape[2]))
+        probs, upd_dec = theano.scan(
+                fn=step, 
+                sequences=[hiddens, exp_word, exp_mask, dropout_masks],
+                outputs_info=None,
+                non_sequences=[self.W, self.b, ruler] + [self.dropout.switch],
+                strict=True)
 
         prob = T.sum(probs, axis=0)
         return (hiddens[-1], prob), concat_updates(upd_rnn, upd_dec)
@@ -265,35 +268,39 @@ class SoftDecoder:
         # h_sentences.shape ~ [n_doc_batch, n_sent, n_hid]
         
         # == Sentence-level Decoder == 
-        def step(exp_sent, exp_mask, doc_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, *args):
+        def step(exp_sent, exp_mask, doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, *args):
             """
-            @exp_sent:  T(*sent_len, *n_doc_batch) [i64]      expected sentence (batch)
-            @exp_mask:  shape ~ exp_sent.shape[:-1];          sent-level mask of cur sentence
-            @doc_mask:  T(*n_doc_batch,);                     doc-level mask
-            @h_dec_tm1: T(n_layers, *n_doc_batch, n_hidden);  previous hidden layers
-            @c_dec_tm1: Same shape;                           previous cell states
-            @x_dec_tm1: T(*n_doc_batch, n_hidden);            output of last word_decoder
-            @h_encs:    T(*n_doc_batch, *n_sent, n_hidden);   h_sentences  
-            @*args:     non_sequences that theano should put into GPU 
+            @exp_sent:     T(*sent_len, *n_doc_batch) [i64]      expected sentence (batch)
+            @exp_mask:     shape ~ exp_sent.shape[:-1];          sent-level mask of cur sentence
+            @doc_mask:     T(*n_doc_batch,);                     doc-level mask
+            @dropout_mask: T(n_layers, *n_doc_batch, n_hidden + n_context)         
+            @h_dec_tm1:    T(n_layers, *n_doc_batch, n_hidden);  previous hidden layers
+            @c_dec_tm1:    Same shape;                           previous cell states
+            @x_dec_tm1:    T(*n_doc_batch, n_hidden);            output of last word_decoder
+            @h_encs:       T(*n_doc_batch, *n_sent, n_hidden);   h_sentences  
+            @*args:        non_sequences that theano should put into GPU 
             """ 
             att_context = self.attention(h_encs, h_dec_tm1[-1]) # (n_doc_batch, n_context)
             inp = T.concatenate([x_dec_tm1, att_context], axis=1)
-            c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, c_dec_tm1, h_dec_tm1) 
+            c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, dropout_mask, c_dec_tm1, h_dec_tm1) 
             (x_dec_t, prob), upd = self.decoder.decode(h_dec_t, exp_sent, exp_mask) 
             return (h_dec_t, c_dec_t, x_dec_t, prob), upd
         
         batch_size = h_sentences.shape[0]
         scan_params = self.rnn.get_params() + self.attention.get_params() + self.decoder.get_params() \
                 + [self.embed, self.dropout.switch] # OPTME: make it elegant
-        [h_decs, _, _, probs], upd_dec = \
-            theano.scan(fn = step,
-                        sequences = Y,
-                        outputs_info = [T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']),
-                                        T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']),
-                                        T.alloc(0.0, batch_size, flags['n_hidden']),
-                                        None],
-                        non_sequences = [h_sentences] + scan_params,
-                        strict=True)
+        dropout_masks = self.dropout.prep_mask(
+                (Y[0].shape[0], flags['n_layers'], batch_size, flags['n_hidden'] + flags['n_context']))
+        [h_decs, _, _, probs], upd_dec = theano.scan(
+                fn = step,
+                sequences = Y + [dropout_masks],
+                outputs_info = [
+                    T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']),
+                    T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']),
+                    T.alloc(0.0, batch_size, flags['n_hidden']),
+                    None],
+                non_sequences = [h_sentences] + scan_params,
+                strict=True)
         #
 
         loss = -T.sum(probs)

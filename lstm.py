@@ -31,10 +31,12 @@ class LSTM:
             n_input = n_hidden
         self.params = self.W + self.U + self.b
     
-    def step(self, x_t, xm_t, pre_c, pre_h, *gpu_args):
+    def step(self, x_t, xm_t, dropout_mask, pre_c, pre_h, *gpu_args):
         """
         @param x_t:    T(n_batch, n_input)
         @param xm_t:   T(n_batch,), 01 vector indicating whether ith sequence has ended
+        @param dropout_mask:
+                       T(n_layers, n_batch, max(n_hidden, n_input))
         @param pre_c:  T(n_layers, n_batch, n_hidden).
         @param pre_h:  T(n_layers, n_batch, n_hidden)
         @param W:      T(n_layers, n_input, 4 * n_hidden)
@@ -50,7 +52,7 @@ class LSTM:
 
         for l in xrange(self.n_layers):
             inp = x_t if l == 0 else hs[l-1]
-            inp = self.dropout(inp)
+            inp = self.dropout(inp, dropout_mask[l, :, 0:inp.shape[1]])
             pre_activation = T.dot(inp, self.W[l]) + T.dot(pre_h[l], self.U[l]) + self.b[l]
             o = T.nnet.sigmoid(slice_(pre_activation, 0))
             f = T.nnet.sigmoid(slice_(pre_activation, 1))
@@ -75,17 +77,21 @@ class LSTM:
                          as mask will reset all states (cell & hidden).
         """
         # TODO: Check if input[-1] == 0 in scan
+        n_len = inputs.shape[0]
         n_batch = inputs.shape[1]
+        n_input = inputs.shape[2]
 
         gen0 = lambda: T.alloc(0., self.n_layers, n_batch, self.n_hidden)
         h_0 = h_0 or gen0()
 
-        [cells, hiddens], updates = theano.scan(fn=self.step, 
-                                                sequences=[dict(input=inputs, taps=delta_t),
-                                                           masks],
-                                                outputs_info=[gen0(), h_0],
-                                                non_sequences=self.get_params() + [self.dropout.switch],
-                                                strict=True)
+        dropout_masks = self.dropout.prep_mask((n_len, self.n_layers, n_batch, T.maximum(self.n_hidden, n_input)))
+
+        [cells, hiddens], updates = theano.scan(
+                fn = self.step, 
+                sequences = [dict(input=inputs, taps=delta_t), masks, dropout_masks],
+                outputs_info = [gen0(), h_0],
+                non_sequences = self.get_params() + [self.dropout.switch],
+                strict = True)
          
         return hiddens, updates
 
