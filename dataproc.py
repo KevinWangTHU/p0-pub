@@ -104,6 +104,7 @@ def build_input(docs, flags):
                               for d_id, (doc, _) in enumerate(cur_docs)]
         all_sent_annotated = concat(cur_docs_annotated)
         if not flags['simplernn']:
+            # Speedup
             all_sent_annotated.sort(key=operator.itemgetter(0))
             concated_sent, concated_mask, doc_sent_pos = build_sent_batch(
                 all_sent_annotated, n_sent_batch, len(cur_docs), max_doc_len)

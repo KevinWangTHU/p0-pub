@@ -54,7 +54,7 @@ class WordEncoder:
         @return: (result, updates)
         multiple sentences can be concatenated and passed in, if seperated by 0 mask 
         """
-        hiddens, updates = self.rnn.forward(sentence, mask)
+        hiddens, updates, _ = self.rnn.forward(sentence, mask)
         return hiddens[:, -1], updates
 
 
@@ -96,7 +96,7 @@ class SentEncoder:
         # doc_hidden.shape ~ [n_sent, n_doc_batch, n_hidden]
 
         # == Sentence-level == 
-        h_encs, upd1 = self.rnn.forward(doc_hidden, doc_mask)
+        h_encs, upd1, _ = self.rnn.forward(doc_hidden, doc_mask)
         h_encs = h_encs[:, -1] # Remove all but the highest layer
         return h_encs, concat_updates(upd0, upd1)
         
@@ -124,10 +124,11 @@ class WordDecoder:
         @return:         ((last_hidden, prob), updates)
                          where prob.shape ~ [batch_size]
         """
+
         n_batch = exp_word.shape[1]
         
         # Forward to RNN
-        hiddens, upd_rnn = self.rnn.forward(self.embed[exp_word], exp_mask, h_0=h_0, delta_t=-1)
+        hiddens, upd_rnn, last_hid = self.rnn.forward(self.embed[exp_word], exp_mask, h_0=h_0, delta_t=-1)
         hiddens = hiddens[:, -1] # remove all but the last layer
 
         # Let ruler = [0, n_batch, ..., (n_batch - 1) * n_batch]
@@ -157,7 +158,7 @@ class WordDecoder:
                 strict=True)
 
         prob = T.sum(probs, axis=0)
-        return (hiddens[-1], prob), concat_updates(upd_rnn, upd_dec)
+        return (last_hid, prob), concat_updates(upd_rnn, upd_dec)
 
     def search(self, h_0):
         """
@@ -170,7 +171,9 @@ class WordDecoder:
             h_t = T.ftensor3('h_t')
             x_t = T.fmatrix('x_t')
             xm_t = T.fvector('xm_t')
-            c_tp1, h_tp1 = self.rnn.step(x_t, xm_t, c_t, h_t)
+            dropout_mask = self.dropout.prob * \
+                    T.ones((h_t.shape[0], h_t.shape[1], max(flags['n_hidden'], flags['n_embed'])))
+            c_tp1, h_tp1 = self.rnn.step(x_t, xm_t, dropout_mask, c_t, h_t)
             p_word_t = T.log(T.nnet.softmax(T.dot(h_tp1[-1], self.W) + self.b))
             return theano.function([c_t, h_t, x_t, xm_t],
                                    [c_tp1, h_tp1, p_word_t])
@@ -188,7 +191,7 @@ class WordDecoder:
             for log_prob, c_t, h_t, x_t, cur_sent in que:
                 c_tp1, h_tp1, p_word_t = self.rnn_next(c_t, h_t, x_t, [1.])
                 p_word_t = p_word_t.flatten() # (1, n_vocab) -> (n_vocab,)
-                tokens_t = np.argpartition(p_word_t, flags['n_beam'])[:flags['n_beam']] # (n_beam,)
+                tokens_t = np.argpartition(p_word_t, flags['n_beam'])[-flags['n_beam']:] # (n_beam,)
                 for tok in tokens_t:
                     log_prob_tp1 = log_prob + p_word_t[tok]
                     x_tp1 = self.embed.get_value(borrow=True)[tok].reshape((1, flags['n_embed']))

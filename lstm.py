@@ -71,8 +71,9 @@ class LSTM:
         @param masks:    T((len, n_batch)), 01 matrix
         @param h_0:      h_0. None for all-0.
         @param delta_t:  tap value of inputs for scan. That of mask is not altered.
-        @return:         (hiddens, updates), where
-                         hidden ~ T(len, n_layers, n_batch, n_hidden).
+        @return:         (hiddens, updates, last_hidden), where
+                         hidden ~ T(len, n_layers, n_batch, n_hidden),
+                         last_hidden is the last non-zero hidden block 
                          NOTE this function should be able to handle concatenated lists,
                          as mask will reset all states (cell & hidden).
         """
@@ -92,6 +93,15 @@ class LSTM:
                 outputs_info = [gen0(), h_0],
                 non_sequences = self.get_params() + [self.dropout.switch],
                 strict = True)
+
+        def filter_last(h_t, mask_t, res_tm1):
+            mask_t = mask_t.dimshuffle(('x', 0, 'x'))
+            return res_tm1 * (1.0 - mask_t) + h_t * mask_t
+
+        last_hidden, _ = theano.foldl(
+                fn = filter_last,
+                sequences = [hiddens, masks],
+                outputs_info = [T.alloc(0., hiddens.shape[1], hiddens.shape[2], hiddens.shape[3])])
          
-        return hiddens, updates
+        return hiddens, updates, last_hidden
 

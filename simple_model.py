@@ -55,8 +55,8 @@ class SimpleRNN:
         @param Y[2]:    unused
         @return: (loss, upd for validator, upd for trainer)
         """
-        hiddens, upd_enc = self.encoder.forward(self.embed[X[0]], X[1]) # (len, nl, n_sent_batch, nh)
-        (_, prob), upd_dec = self.decoder.decode(hiddens[-1], Y[0][0], Y[1][0])
+        hiddens, upd_enc, last_hid = self.encoder.forward(self.embed[X[0]], X[1]) # (len, nl, n_sent_batch, nh)
+        (_, prob), upd_dec = self.decoder.decode(last_hid, Y[0][0], Y[1][0])
         loss = -T.sum(prob)
         grad = T.grad(-loss, self.get_params())
         rng_updates = concat_updates(upd_enc, upd_dec)
@@ -92,10 +92,10 @@ class SimpleRNN:
         if not hasattr(self, 'encode'):
             data = T.lmatrix('data')
             mask = T.fmatrix('mask')
-            hid, upd = self.encoder.forward(self.embed[data], mask)
+            hid, upd, last_hid = self.encoder.forward(self.embed[data], mask)
             self.encode = theano.function(
                 [data, mask],
-                hid[-1],
+                last_hid,
                 updates=upd)
 
         max_sent_len = X[0].shape[0]
