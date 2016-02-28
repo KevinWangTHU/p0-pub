@@ -77,7 +77,6 @@ class LSTM:
                          NOTE this function should be able to handle concatenated lists,
                          as mask will reset all states (cell & hidden).
         """
-        # TODO: Check if input[-1] == 0 in scan
         n_len = inputs.shape[0]
         n_batch = inputs.shape[1]
         n_input = inputs.shape[2]
@@ -87,9 +86,16 @@ class LSTM:
 
         dropout_masks = self.dropout.prep_mask((n_len, self.n_layers, n_batch, T.maximum(self.n_hidden, n_input)))
 
+        assert -1 <= delta_t <= 0
+        if delta_t == -1:
+            inputs = T.concatenate(
+                [T.shape_padleft(T.zeros_like(inputs[0])),
+                 inputs[:-1]],
+                axis=0)
+
         [cells, hiddens], updates = theano.scan(
                 fn = self.step, 
-                sequences = [dict(input=inputs, taps=delta_t), masks, dropout_masks],
+                sequences = [inputs, masks, dropout_masks],
                 outputs_info = [gen0(), h_0],
                 non_sequences = self.get_params() + [self.dropout.switch],
                 strict = True)

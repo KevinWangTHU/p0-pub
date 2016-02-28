@@ -73,12 +73,20 @@ def build_input(docs, flags):
         # Concatenate all paragraphs & sentences (keeping the list hierarchy), 
         # and sort wrt number of words.
         for doc, highlight in docs:
-            doc = [[concat(concat(doc))]]
             highlight = [[concat(concat(highlight))]]
+            if not flags['__ae__']:
+                doc = [[concat(concat(doc))]]
+            else:
+                import copy
+                doc = copy.deepcopy(highlight)
+                highlight = [[list(reversed(highlight[0][0]))]]
+            #
             n_word = len(doc[0][0])
             n_docs.append((n_word, doc, highlight))
         n_docs.sort(key=lambda x: x[0])
         n_docs = [x[1:] for x in n_docs]            
+
+    # TODO: Implement reverse_output
 
     # Build batches
     batches = []
@@ -152,4 +160,9 @@ def load_data(flags):
 def load_test_data(flags):
     with open(flags['train_data'] + '.train') as fin:
         all_docs = cPickle.load(fin)
-    return build_input(all_docs, flags)
+    np.random.seed(7297)
+    np.random.shuffle(all_docs)
+    split = len(all_docs) * 4 / 5
+    ret = build_input(all_docs[-100:], flags)
+    np.random.shuffle(ret)
+    return ret

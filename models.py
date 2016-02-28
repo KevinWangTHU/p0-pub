@@ -133,11 +133,11 @@ class WordDecoder:
         hiddens, upd_rnn, last_hid = self.rnn.forward(self.embed[exp_word], exp_mask, h_0=h_0, delta_t=-1)
         hiddens = hiddens[:, -1] # remove all but the last layer
 
-        # Let ruler = [0, n_batch, ..., (n_batch - 1) * n_batch]
+        # Let ruler = [0, n_vocab, ..., (n_batch - 1) * n_vocab]
         ruler, _ = theano.scan(fn = lambda pre: pre+1,
                                outputs_info = [T.cast(T.alloc(-1), 'int64')],
                                n_steps = n_batch)
-        ruler = n_batch * ruler
+        ruler = flags['n_vocab'] * ruler
 
         # Use top hidden layer to compute probabilities
         def step(h_t, exp_word_t, exp_mask_t, dropout_mask, *args):
@@ -173,9 +173,10 @@ class WordDecoder:
             h_t = T.ftensor3('h_t')
             x_t = T.fmatrix('x_t')
             xm_t = T.fvector('xm_t')
-            dropout_mask = self.dropout.prob * \
+            dropout_mask = (1.0 - self.dropout.prob) * \
                     T.ones((h_t.shape[0], h_t.shape[1], max(flags['n_hidden'], flags['n_embed'])))
             c_tp1, h_tp1 = self.rnn.step(x_t, xm_t, dropout_mask, c_t, h_t)
+            h_tp1 = self.dropout(h_tp1, dropout_mask)
             p_word_t = T.log(T.nnet.softmax(T.dot(h_tp1[-1], T.dot(self.W0, self.W1)) + self.b))
             return theano.function([c_t, h_t, x_t, xm_t],
                                    [c_tp1, h_tp1, p_word_t])

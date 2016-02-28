@@ -21,8 +21,10 @@ from util import *
 
 
 gflags.DEFINE_enum('mode', 'train', ['train', 'test'], 'as shown')
+gflags.DEFINE_bool('__ae__', False, 'Train an autoencoder')
 gflags.DEFINE_bool('dump_highlights', True, 'dump generated highlights in test mode')
 gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
+gflags.DEFINE_bool('reverse_output', False, 'Reverse output when predicting')
 
 gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
 gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
@@ -113,6 +115,7 @@ def compile_functions(model):
 def test_model(model, test_batches):
     bleus = []
     generated_highlights = []
+    model.dropout.switch.set_value(0.)
     for batch_id, b, data_hlts in test_batches:
         model_hlts = model.test(b[0:4]) # ~ [[(float(LogP), [[int] * n_hlts])] * n_beam] * n_batch
         model_hlts = [hl[0][1] for hl in model_hlts]  # Remove all but the most probable text
