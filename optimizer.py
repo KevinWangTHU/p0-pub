@@ -79,6 +79,9 @@ def AdaDelta(params, grads, lr, updates, flags):
 
 
 def optimize(params, updates, flags):
+    """
+    NOTE: grads_loc should be updated with gradients divided by batch_size.
+    """
     optimizers = {'SGD': SGD,
                   'AdaGrad': AdaGrad,
                   'RMSProp': RMSProp,
@@ -86,8 +89,18 @@ def optimize(params, updates, flags):
                   'AdaDelta': AdaDelta}
     if updates == {}: # Updates should always be OrderedDict
         updates = collections.OrderedDict()
-    grads = [theano.shared(p.get_value() * numpy.asarray(0.0, dtype='float32'),
-                           name=p.name+'_grad') \
-             for p in params]
+    grads_loc = [theano.shared(p.get_value() * numpy.asarray(0.0, dtype='float32'),
+                               name=p.name+'_grad') \
+                 for p in params]
+    if flags['clip_grads']:
+        grad_norm = T.sqrt(sum([T.sum(g ** 2) for g in grads_loc]))
+        scaling = theano.ifelse.ifelse(
+                T.lt(grad_norm, flags['max_grad_norm']), 
+                T.cast(1, 'float32'),
+                T.cast(flags['max_grad_norm'], 'float32') / grad_norm)
+        grads = [scaling * g for g in grads_loc]
+    else:
+        grads = grads_loc
     lr = T.fscalar('opt_lr')
-    return lr, grads, optimizers[flags['optimizer']](params, grads, lr, updates, flags)
+    return lr, grads_loc, optimizers[flags['optimizer']](params, grads, lr, updates, flags)
+

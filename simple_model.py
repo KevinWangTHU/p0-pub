@@ -57,7 +57,7 @@ class SimpleRNN:
         """
         hiddens, upd_enc, last_hid = self.encoder.forward(self.embed[X[0]], X[1]) # (len, nl, n_sent_batch, nh)
         (_, prob), upd_dec = self.decoder.decode(last_hid, Y[0][0], Y[1][0])
-        loss = -T.sum(prob)
+        loss = -T.sum(prob) / T.cast(X[0].shape[1], 'float32')
         grad = T.grad(-loss, self.get_params())
         rng_updates = concat_updates(upd_enc, upd_dec)
         return self.get_params(), loss, grad, rng_updates

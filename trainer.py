@@ -34,13 +34,15 @@ gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
 gflags.DEFINE_integer('n_beam', 5, 'Number of candidates in beam search')
 gflags.DEFINE_integer('n_max_sent', 30, 'Maximum sentence length allowed in beam search')
-gflags.DEFINE_float('dropout_prob', 0.5, 'Pr[drop_unit]')
+gflags.DEFINE_float('dropout_prob', 0.2, 'Pr[drop_unit]')
+gflags.DEFINE_bool('clip_grads', True, 'Clip gradients')
+gflags.DEFINE_float('max_grad_norm', 5, 'Maximum gradient norm allowed (divided by batch_size)')
 
-gflags.DEFINE_enum('optimizer', 'RMSProp2', ['AdaDelta', 'AdaGrad', 'RMSProp', 'RMSProp2', 'SGD'],
+gflags.DEFINE_enum('optimizer', 'SGD', ['AdaDelta', 'AdaGrad', 'RMSProp', 'RMSProp2', 'SGD'],
                    'as shown')
-gflags.DEFINE_float('lr', 1e-5, 'Learning rate for all optimizers')
+gflags.DEFINE_float('lr', 0.1, 'Learning rate for all optimizers')
 gflags.DEFINE_float('opt_decay', 0.9, 'Decay rate for RMS.+/Ada.+')
-gflags.DEFINE_float('opt_momentum', 0.9, 'Momentum for SGD')
+gflags.DEFINE_float('opt_momentum', 0, 'Momentum for SGD')
 
 gflags.DEFINE_bool('compile', True, 'Recompile theano functions')
 gflags.DEFINE_bool('func_output', False, 'Dump function if compiled')

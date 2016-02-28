@@ -22,10 +22,11 @@ def init_matrix_u(shape, name='', pdict=None):
         assert name in pdict
         log_info({'type': 'data', 'value': 'loaded matrix %s (%s)' % (name, str(pdict[name].shape))})
         return theano.shared(pdict[name])
-    if len(shape) == 1: 
-        m = np.sqrt(6.0 / (shape[0] + 1))
-    else:
-        m = np.sqrt(6.0 / (shape[0] + shape[1]))
+#    if len(shape) == 1: 
+#        m = np.sqrt(6.0 / (shape[0] + 1))
+#    else:
+#        m = np.sqrt(6.0 / (shape[0] + shape[1]))
+    m = 0.08
     return theano.shared(np.random.uniform(-m, +m, shape).astype('f'), name=name)
 
 

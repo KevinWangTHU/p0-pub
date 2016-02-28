@@ -104,13 +104,15 @@ class SentEncoder:
 class WordDecoder:
 
     def get_params(self):
-        return self.rnn.get_params() + [self.W, self.b]
+        return self.rnn.get_params() + [self.W0, self.W1, self.b]
 
     def __init__(self, embed, pdict, dropout):
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_embed'], flags['n_hidden'],
                              dropout, 'worddec_rnn', pdict)
         self.embed = embed
-        self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
+#        self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
+        self.W0 = init_matrix_u((flags['n_hidden'], flags['n_embed']), 'worddec_W0', pdict)
+        self.W1 = init_matrix_u((flags['n_embed'], flags['n_vocab']), 'worddec_W1', pdict)
         self.b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
         self.dropout = dropout
         self.eos = 2 if flags['simplernn'] else 1
@@ -143,7 +145,7 @@ class WordDecoder:
             @param h_t:      T(n_batch, n_hidden), hidden block of last level
             """
             h_t = self.dropout(h_t, dropout_mask)
-            act_word = T.nnet.softmax(T.dot(h_t, self.W) + self.b)
+            act_word = T.nnet.softmax(T.dot(h_t, T.dot(self.W0, self.W1)) + self.b)
             prob = T.flatten(act_word)[exp_word_t + ruler] + 1e-6
             log_prob = exp_mask_t * T.log(prob)
             return log_prob
@@ -154,7 +156,7 @@ class WordDecoder:
                 fn=step, 
                 sequences=[hiddens, exp_word, exp_mask, dropout_masks],
                 outputs_info=None,
-                non_sequences=[self.W, self.b, ruler] + [self.dropout.switch],
+                non_sequences=[self.W0, self.W1, self.b, ruler] + [self.dropout.switch],
                 strict=True)
 
         prob = T.sum(probs, axis=0)
@@ -174,7 +176,7 @@ class WordDecoder:
             dropout_mask = self.dropout.prob * \
                     T.ones((h_t.shape[0], h_t.shape[1], max(flags['n_hidden'], flags['n_embed'])))
             c_tp1, h_tp1 = self.rnn.step(x_t, xm_t, dropout_mask, c_t, h_t)
-            p_word_t = T.log(T.nnet.softmax(T.dot(h_tp1[-1], self.W) + self.b))
+            p_word_t = T.log(T.nnet.softmax(T.dot(h_tp1[-1], T.dot(self.W0, self.W1)) + self.b))
             return theano.function([c_t, h_t, x_t, xm_t],
                                    [c_tp1, h_tp1, p_word_t])
 
@@ -306,7 +308,7 @@ class SoftDecoder:
                 strict=True)
         #
 
-        loss = -T.sum(probs)
+        loss = -T.sum(probs) / T.cast(batch_size, 'float32')
         grad = T.grad(-loss, self.get_params()) 
         rng_updates = concat_updates(upd_enc, upd_dec)
         return self.get_params(), loss, grad, rng_updates
