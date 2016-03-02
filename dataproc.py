@@ -134,6 +134,8 @@ def build_input(docs, flags):
         for doc_id, (_, hl) in enumerate(cur_docs):
             for hl_id, hl_sent in enumerate(hl):
                 for tok_id, token in enumerate(hl_sent):
+                    if token >= flags['n_out_vocab']:
+                        token = 0 # <UNK>
                     hl_sent_data[hl_id, tok_id, doc_id] = token
                     hl_sent_mask[hl_id, tok_id, doc_id] = 1.
         

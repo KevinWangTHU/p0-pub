@@ -110,10 +110,10 @@ class WordDecoder:
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_embed'], flags['n_hidden'],
                              dropout, 'worddec_rnn', pdict)
         self.embed = embed
-#        self.W = init_matrix_u((flags['n_hidden'], flags['n_out_vocab']), 'worddec_W', pdict)
+#        self.W = init_matrix_u((flags['n_hidden'], flags['n_vocab']), 'worddec_W', pdict)
         self.W0 = init_matrix_u((flags['n_hidden'], flags['n_embed']), 'worddec_W0', pdict)
-        self.W1 = init_matrix_u((flags['n_embed'], flags['n_out_vocab']), 'worddec_W1', pdict)
-        self.b = init_matrix_u((flags['n_out_vocab'],), 'worddec_b', pdict)
+        self.W1 = init_matrix_u((flags['n_embed'], flags['n_vocab']), 'worddec_W1', pdict)
+        self.b = init_matrix_u((flags['n_vocab'],), 'worddec_b', pdict)
         self.dropout = dropout
         self.eos = 2 if flags['simplernn'] else 1
     
@@ -133,11 +133,11 @@ class WordDecoder:
         hiddens, upd_rnn, last_hid = self.rnn.forward(self.embed[exp_word], exp_mask, h_0=h_0, delta_t=-1)
         hiddens = hiddens[:, -1] # remove all but the last layer
 
-        # Let ruler = [0, n_out_vocab, ..., (n_batch - 1) * n_out_vocab]
+        # Let ruler = [0, n_vocab, ..., (n_batch - 1) * n_vocab]
         ruler, _ = theano.scan(fn = lambda pre: pre+1,
                                outputs_info = [T.cast(T.alloc(-1), 'int64')],
                                n_steps = n_batch)
-        ruler = flags['n_out_vocab'] * ruler
+        ruler = flags['n_vocab'] * ruler
 
         # Use top hidden layer to compute probabilities
         def step(h_t, exp_word_t, exp_mask_t, dropout_mask, *args):
@@ -193,13 +193,13 @@ class WordDecoder:
             nque = []
             for log_prob, c_t, h_t, x_t, cur_sent in que:
                 c_tp1, h_tp1, p_word_t = self.rnn_next(c_t, h_t, x_t, [1.])
-                p_word_t = p_word_t.flatten() # (1, n_out_vocab) -> (n_out_vocab,)
-                tokens_t = np.argpartition(p_word_t, flags['n_out_vocab'] - flags['n_beam'])[-flags['n_beam']:] # (n_beam,)
+                p_word_t = p_word_t.flatten() # (1, n_vocab) -> (n_vocab,)
+                tokens_t = np.argpartition(p_word_t, flags['n_beam'])[-flags['n_beam']:] # (n_beam,)
                 for tok in tokens_t:
                     log_prob_tp1 = log_prob + p_word_t[tok]
                     x_tp1 = self.embed.get_value(borrow=True)[tok].reshape((1, flags['n_embed']))
                     node = (log_prob_tp1, c_tp1, h_tp1, x_tp1, cur_sent + [tok])
-                    if tok == self.eos and not flags['__ae__'] and not flags['reverse_output']: 
+                    if tok == self.eos: 
                         final_beams.append(node)
                     else:
                         nque.append(node)

@@ -30,6 +30,7 @@ gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
 gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
 gflags.DEFINE_integer('n_context', 200, 'Dimension of context layer')
 gflags.DEFINE_integer('n_vocab', 100000, 'as shown')
+gflags.DEFINE_integer('n_out_vocab', 50000, '#{Top k words used in prediction}')
 gflags.DEFINE_integer('n_layers', 1, 'Number of RNN layers') # n_layers=1 causes CE in theano 0.7; fixed in dev version
 gflags.DEFINE_integer('n_doc_batch', 10, 'Documents per batch')
 gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document batch')
