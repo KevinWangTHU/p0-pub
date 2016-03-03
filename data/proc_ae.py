@@ -1,10 +1,17 @@
+# Generate data to train autoencoders.
+# The output has the same format as proc.py, but each doc contains only one sentence in a story, and the highlight is exactly the same.
+
 #wdict["%%unk%%"] = 0
 #wdict["%%para_end%%"] = 1
 #wdict["%%doc_end%%"] = 2
 
+# TODO: Check if the output contains "\.".
+# TODO: Use the same format for proc.py
+
 import nltk
 import re
 import os
+import copy
 import numpy as np
 
 import gflags
@@ -20,7 +27,6 @@ flags = gflags.FLAGS
 
 def process_text(file_path):
     text = []
-    highlight = []
     with open(file_path) as fin:
         #
         lines = fin.readlines()
@@ -29,13 +35,9 @@ def process_text(file_path):
         #
         signs = re.compile('[\+\-\.\,\%]') # For digit removal
         sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
-        is_highlight = False
         for l in lines:
-            if l == '@highlight':
-                is_highlight = True
-                continue
-            #
             raw_sents = sent_tokenizer.tokenize(l.decode('utf-8'))
+            print >>sys.stderr, raw_sents # FIXME
             sents = []
             for sent in raw_sents:
                 tokens = nltk.tokenize.casual_tokenize(sent, preserve_case=False)
@@ -43,13 +45,9 @@ def process_text(file_path):
                           for w in tokens][:flags.max_tokens_per_sentence]
                 sents.append(tokens)
 
-            if is_highlight:
-                highlight.append(sents) 
-                is_highlight = False
-            else:
-                text.append(sents)
+            text.append(sents)
 
-    return text[:flags.max_paragraphs_per_document], highlight 
+    return text[:flags.max_paragraphs_per_document]
 
 
 def update_wdict(doc, wdict):
@@ -92,14 +90,16 @@ def main():
     n_empty = 0
     for i, story in enumerate(files):
         print >>sys.stderr, "\r%d/%d stories loaded" % (i, len_files),
-        text, highlight = process_text(story)
-        if len(text) == 0 or len(highlight) == 0:
+        text = process_text(story)
+        if len(text) == 0:
             n_empty += 1
             continue
         update_wdict(text, wdict)
-        update_wdict(highlight, wdict)
-        stories.append((text, highlight))
+        for paragraph in text:
+            for sentence in paragraph:
+                stories.append([[sentence]], [[copy.deepcopy(sentence)]])
     print >>sys.stderr, "\nStories loaded; %d empty stories excluded." % n_empty
+    print >>sys.stderr, "%d sentences loaded." % len(stories)
     
     # Remove infrequent words & add markers
     word_freqs = wdict.items()
