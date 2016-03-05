@@ -2,6 +2,7 @@ import cPickle
 import operator
 import numpy as np
 import theano
+import copy
 
 from util import *
 
@@ -62,31 +63,34 @@ def build_input(docs, flags):
     """
 
     n_docs = []
+
+    
+
     if not flags['simplernn']:
         # Sort documents by number of sentences
         for doc, highlight in docs:
             n_sent = sum([len(para) for para in doc])
             n_docs.append((n_sent, doc, highlight))
-        n_docs.sort(key=lambda x: x[0])
-        n_docs = [x[1:] for x in n_docs]
     else:
+        # Single-layer RNN
         # Concatenate all paragraphs & sentences (keeping the list hierarchy), 
         # and sort wrt number of words.
         for doc, highlight in docs:
             highlight = [[concat(concat(highlight))]]
             if not flags['__ae__']:
                 doc = [[concat(concat(doc))]]
-            else:
-                import copy
+            else: # highlight := doc
                 doc = copy.deepcopy(highlight)
-                highlight = [[list(reversed(highlight[0][0]))]]
-            #
             n_word = len(doc[0][0])
             n_docs.append((n_word, doc, highlight))
-        n_docs.sort(key=lambda x: x[0])
-        n_docs = [x[1:] for x in n_docs]            
+            
+    n_docs.sort(key=lambda x: x[0])
+    n_docs = [x[1:] for x in n_docs]            
 
-    # TODO: Implement reverse_output
+    if flags['reverse_input']:
+        revdoc = lambda doc: \
+            [[list(reversed(sentence)) for sentence in reversed(paragraph)] for paragraph in reversed(doc)]
+        n_docs = [(revdoc(doc), hlt) for doc, hlt in n_docs]
 
     # Build batches
     batches = []

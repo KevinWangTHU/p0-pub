@@ -78,8 +78,9 @@ class SentEncoder:
                                                  assuming their first two axises are flattened.
         @param doc_mask:     T(*n_sent, *n_doc_batch)
                              mask matrix marking the end of each document
-        @return:             (h_sent, updates) where
-                              h_sent: T(*n_sent, *n_doc_batch, n_hidden)  
+        @return:             (h_sent, last_hid, updates) where
+        @h_sent:             T(*n_sent, *n_doc_batch, n_hidden), encoding of all sentences in each doc
+        @last_hid:           T(n_layers, n_doc_batch, n_hidden), last hidden block of sentence-level RNN
         """
 
         # == Word-level encoding ==
@@ -96,9 +97,9 @@ class SentEncoder:
         # doc_hidden.shape ~ [n_sent, n_doc_batch, n_hidden]
 
         # == Sentence-level == 
-        h_encs, upd1, _ = self.rnn.forward(doc_hidden, doc_mask)
-        h_encs = h_encs[:, -1] # Remove all but the highest layer
-        return h_encs, concat_updates(upd0, upd1)
+        h_encs, upd1, last_hid = self.rnn.forward(doc_hidden, doc_mask)
+        # return h_encs[:, -1], T.zeros_like(last_hid), concat_updates(upd0, upd1)
+        return doc_hidden, last_hid, concat_updates(upd0, upd1)
         
 
 class WordDecoder:
@@ -162,13 +163,18 @@ class WordDecoder:
         prob = T.sum(probs, axis=0)
         return (last_hid, prob), concat_updates(upd_rnn, upd_dec)
 
-    def search(self, h_0):
+    def search_b(self, h_0, n_max_sent, prune_res=True):
         """
-        @param h_0:     np.array of (n_layers, 1, n_hidden)
-        @return:        list of best beams [(log-likelihood, last H, token list)] 
+        @param h_0:     np.array of (n_layers, batch_size, n_hidden)
+        @return:        list of best beams [(NLL, last_hid, token list)] for each input in batch
+                        last_hid.shape ~ (n_layers, n_hidden)
         """
 
         def compile_next():
+            """
+            compiles LSTM step function
+            @return:    c_tp1, h_tp1, p_word_t ~ (batch_size, n_out_vocab)
+            """
             c_t = T.ftensor3('c_t')
             h_t = T.ftensor3('h_t')
             x_t = T.fmatrix('x_t')
@@ -183,32 +189,52 @@ class WordDecoder:
 
         if not hasattr(self, 'rnn_next'):
             self.rnn_next = compile_next()
-        
-        # == Beam Search ==
-        c_0 = 0.0 * h_0
-        x_0 = np.zeros((1, flags['n_embed'])).astype('f')
-        que = [(0.0, c_0, h_0, x_0, [])]
-        final_beams = []
-        for i in xrange(flags['n_max_sent']):
-            nque = []
-            for log_prob, c_t, h_t, x_t, cur_sent in que:
-                c_tp1, h_tp1, p_word_t = self.rnn_next(c_t, h_t, x_t, [1.])
-                p_word_t = p_word_t.flatten() # (1, n_out_vocab) -> (n_out_vocab,)
-                tokens_t = np.argpartition(p_word_t, flags['n_out_vocab'] - flags['n_beam'])[-flags['n_beam']:] # (n_beam,)
-                for tok in tokens_t:
-                    log_prob_tp1 = log_prob + p_word_t[tok]
-                    x_tp1 = self.embed.get_value(borrow=True)[tok].reshape((1, flags['n_embed']))
-                    node = (log_prob_tp1, c_tp1, h_tp1, x_tp1, cur_sent + [tok])
-                    if tok == self.eos and not flags['__ae__'] and not flags['reverse_output']: 
-                        final_beams.append(node)
-                    else:
-                        nque.append(node)
-            #
-            que = sorted(nque, key=lambda x: -x[0])[:flags['n_beam']]
 
-        final_beams += que
-        final_beams = sorted(final_beams, key=lambda x: -x[0])[:flags['n_beam']]
-        return [(b[0], b[2], b[4]) for b in final_beams]
+        # == Batched Beam Search ==
+        def sel(arr, i):
+            return arr[:, i].reshape((arr.shape[0], 1) + arr.shape[2:])
+
+        n_input_batch = h_0.shape[1]
+        c_0 = 0.0 * h_0
+        x_0 = np.zeros((n_input_batch, flags['n_embed'])).astype('f')
+        que = [[(0., sel(c_0, i), sel(h_0, i), x_0[i], [], i)]\
+               for i in xrange(n_input_batch)]
+        results = [[] for i in xrange(n_input_batch)]
+
+        for t in xrange(n_max_sent):
+            nll_list, c_t_list, h_t_list, x_t_list, tokens_list, id_list = zip(*concat(que)) 
+            c_t = np.concatenate(c_t_list, axis=1)
+            h_t = np.concatenate(h_t_list, axis=1)
+            x_t = np.vstack(x_t_list)
+            xm_t = np.ones((x_t.shape[0], )).astype('f')
+            # Forward batch to RNN
+            c_tp1, h_tp1, p_word_t = self.rnn_next(c_t, h_t, x_t, xm_t)
+            argp_t = np.argpartition(p_word_t, -(flags['n_beam'] + 1))[:, -(flags['n_beam'] + 1):] # +1 for EOS
+            beam_candidates = [[] for _ in xrange(n_input_batch)]
+            # For each beam in que, construct new beams
+            for bpos in xrange(len(c_t_list)):
+                inp_id = id_list[bpos]
+                for tok in argp_t[bpos]:
+                    nll_tp1 = nll_list[bpos] - p_word_t[bpos, tok]
+                    if tok == self.eos:
+                        results[inp_id].append((nll_tp1, h_tp1[:, bpos], tokens_list[bpos] + [tok]))
+                    else:
+                        beam_candidates[inp_id].append((nll_tp1, bpos, tok))
+            # Keep top `n_beam` beams for each input
+            beam_candidates = [sorted(q)[:flags['n_beam']] for q in beam_candidates]
+            # Append c, h, x
+            for i, beams_i in enumerate(beam_candidates):
+                for j, (nll, bpos, tok) in enumerate(beams_i):
+                    x_tp1 = self.embed.get_value(borrow=True)[tok].reshape((flags['n_embed'],))
+                    n_tokens = tokens_list[bpos] + [tok]
+                    beam_candidates[i][j] = (nll, sel(c_tp1, bpos), sel(h_tp1, bpos), x_tp1, n_tokens, i)
+            que = beam_candidates
+        
+        # Clean que
+        keep = flags['n_beams'] if prune_res else None
+        nque = [[(q[0], q[2], q[4]) for q in que_i] for que_i in que]
+        results = [sorted(res_i + nq_i)[:keep] for res_i, nq_i in zip(results, nque)]
+        return results
 
 
 class SoftDecoder:
@@ -252,6 +278,30 @@ class SoftDecoder:
         pdict['__theano_mrg_state_updates__'] = np.array(self.dropout.rng.state_updates, dtype='object')
         np.savez(file_, **pdict)
 
+    def att_step_rnn(self, doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs):
+        # Code folding
+        att_context = self.attention(h_encs, h_dec_tm1[-1]) # (n_doc_batch, n_context)
+        inp = T.concatenate([x_dec_tm1, att_context], axis=1)
+        c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, dropout_mask, c_dec_tm1, h_dec_tm1) 
+        return c_dec_t, h_dec_t
+
+    def att_step(self, exp_sent, exp_mask, doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, *args):
+        """
+        Step function in sentence-level decoding.
+        @exp_sent:     T(*sent_len, *n_doc_batch) [i64]      expected sentence (batch)
+        @exp_mask:     shape ~ exp_sent.shape[:-1];          sent-level mask of cur sentence
+        @doc_mask:     T(*n_doc_batch,);                     doc-level mask
+        @dropout_mask: T(n_layers, *n_doc_batch, n_hidden + n_context)         
+        @h_dec_tm1:    T(n_layers, *n_doc_batch, n_hidden);  previous hidden layers
+        @c_dec_tm1:    Same shape;                           previous cell states
+        @x_dec_tm1:    T(*n_doc_batch, n_hidden);            output of last word_decoder
+        @h_encs:       T(*n_doc_batch, *n_sent, n_hidden);   h_sentences  
+        """ 
+        c_dec_t, h_dec_t = self.att_step_rnn(doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs)
+        (last_hidden, prob), upd = self.decoder.decode(h_dec_t, exp_sent, exp_mask) 
+        x_dec_t = last_hidden[-1]
+        return (h_dec_t, c_dec_t, x_dec_t, prob), upd
+
     def train(self, X, Y):
         """
         @param X[0..3]: Input doc info. Check SentEncoder.forward
@@ -269,28 +319,10 @@ class SoftDecoder:
         X[0] = self.embed[X[0]]
         
         # == Encoding ==
-        h_sentences, upd_enc = self.encoder.forward(*X)
+        h_sentences, lasthid_enc, upd_enc = self.encoder.forward(*X)
         h_sentences = h_sentences.dimshuffle((1, 0, 2))  # OPTME
-        # h_sentences.shape ~ [n_doc_batch, n_sent, n_hid]
-        
-        # == Sentence-level Decoder == 
-        def step(exp_sent, exp_mask, doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, *args):
-            """
-            @exp_sent:     T(*sent_len, *n_doc_batch) [i64]      expected sentence (batch)
-            @exp_mask:     shape ~ exp_sent.shape[:-1];          sent-level mask of cur sentence
-            @doc_mask:     T(*n_doc_batch,);                     doc-level mask
-            @dropout_mask: T(n_layers, *n_doc_batch, n_hidden + n_context)         
-            @h_dec_tm1:    T(n_layers, *n_doc_batch, n_hidden);  previous hidden layers
-            @c_dec_tm1:    Same shape;                           previous cell states
-            @x_dec_tm1:    T(*n_doc_batch, n_hidden);            output of last word_decoder
-            @h_encs:       T(*n_doc_batch, *n_sent, n_hidden);   h_sentences  
-            @*args:        non_sequences that theano should put into GPU 
-            """ 
-            att_context = self.attention(h_encs, h_dec_tm1[-1]) # (n_doc_batch, n_context)
-            inp = T.concatenate([x_dec_tm1, att_context], axis=1)
-            c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, dropout_mask, c_dec_tm1, h_dec_tm1) 
-            (x_dec_t, prob), upd = self.decoder.decode(h_dec_t, exp_sent, exp_mask) 
-            return (h_dec_t, c_dec_t, x_dec_t, prob), upd
+        # h_sentences.shape ~ [*n_doc_batch, n_sent, n_hid]
+        # lasthid_enc.shape ~ [n_layer, n_doc_batch, n_hid]
         
         batch_size = h_sentences.shape[0]
         scan_params = self.rnn.get_params() + self.attention.get_params() + self.decoder.get_params() \
@@ -298,21 +330,67 @@ class SoftDecoder:
         dropout_masks = self.dropout.prep_mask(
                 (Y[0].shape[0], flags['n_layers'], batch_size, flags['n_hidden'] + flags['n_context']))
         [h_decs, _, _, probs], upd_dec = theano.scan(
-                fn = step,
-                sequences = Y + [dropout_masks],
-                outputs_info = [
-                    T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']),
-                    T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']),
-                    T.alloc(0.0, batch_size, flags['n_hidden']),
-                    None],
-                non_sequences = [h_sentences] + scan_params,
-                strict=True)
+            fn = lambda *args: self.att_step(*args),
+            sequences = Y + [dropout_masks],
+            outputs_info = [
+                lasthid_enc, # H
+                T.alloc(0.0, flags['n_layers'], batch_size, flags['n_hidden']), # C
+                T.alloc(0.0, batch_size, flags['n_hidden']), # X
+                None],
+            non_sequences = [h_sentences] + scan_params,
+            strict=True)
         #
 
         loss = -T.sum(probs) / T.cast(batch_size, 'float32')
         grad = T.grad(-loss, self.get_params()) 
         rng_updates = concat_updates(upd_enc, upd_dec)
         return self.get_params(), loss, grad, rng_updates
+
+    def test(self, X, max_doc_len, max_sent_len):
+        """
+        @param X[]: Input representing *one* document. numpy.ndarray of the same shape as .train
+        @return:    Generated highlights as 
+                    [[(negative-log-likelihood, [token-list]) for each beam] for each doc]
+        """
+        def compile_aux():
+            self.aux_compiled = True
+
+            # = forward =
+            # may consider make h_sentences a shared variable btw the two functions
+            X = [T.lmatrix('X_data'), T.fmatrix('X_mask'), T.lmatrix('X_pos'), T.fmatrix('X_mask_d')]
+            X[0] = self.embed[X[0]]
+            h_sentences, last_hid, upd_enc = self.encoder.forward(*X)
+            h_sentences = h_sentences.dimshuffle((1, 0, 2)) 
+            self.f_forward = theano.function(X, (h_sentences, last_hid), updates=upd_enc)
+
+            # = att_step_rnn =
+            step_args = [T.ftensor3('h_dec_tm1'), T.ftensor3('c_dec_tm1'), T.fmatrix('x_dec_tm1'),
+                         T.ftensor3('h_encs')]
+            n_batch = step_args[0].shape[1]
+            doc_mask = T.ones((n_batch,), dtype='float32')
+            dropout_mask = (1.0 - self.dropout.prob) * \
+                T.ones((flags['n_layers'], n_batch, flags['n_hidden'] + flags['n_context']))
+            c_dec_t, h_dec_t = self.att_step_rnn(doc_mask, dropout_mask, *step_args)
+            self.f_att_step_rnn = theano.function(step_args, [c_dec_t, h_dec_t])
+
+        # == test(self, X): ==
+        if not self.aux_compiled:
+            compile_aux()
+
+        h_encs, lasthid_enc = self.f_forward(*X)
+
+        # == Beam search ==
+        n_batch = lasthid_enc.shape[0]
+        que = [(0.0, lasthid_enc, 0.0 * lasthid_enc, np.zeros((n_batch, flags['n_hidden'])), [])]
+        for t in xrange(max_doc_len):
+            nque = []
+            for nll_tm1, h_tm1, c_tm1, x_t, tokens_tm1 in que:
+                c_t, h_t = self.f_att_step_rnn(h_tm1, c_tm1, x_t, h_encs)
+                candidates = self.decoder.search_b(h_t, max_sent_len, prune_res=True)
+                for nll_sent, lasthid_sent, tokens_sent in candidates:
+                    nque.append((nll_tm1 + nll_sent, h_t, c_t, lasthid_sent, tokens_tm1 + [tokens_sent]))
+            nque = sorted(nque)[:flags['n_beam']]
+        return nque
 
     def init_rng(self):
         """

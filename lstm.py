@@ -4,7 +4,6 @@ import theano.tensor as T
 from theano.tensor.shared_randomstreams import RandomStreams
 import numpy as np
 from optimizer import optimize
-import lmdb
 
 from util import *
 

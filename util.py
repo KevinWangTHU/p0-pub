@@ -21,6 +21,7 @@ def init_matrix_u(shape, name='', pdict=None):
     if pdict:
         assert name in pdict
         log_info({'type': 'data', 'value': 'loaded matrix %s (%s)' % (name, str(pdict[name].shape))})
+        assert pdict[name].shape == shape
         return theano.shared(pdict[name])
 #    if len(shape) == 1: 
 #        m = np.sqrt(6.0 / (shape[0] + 1))

@@ -24,7 +24,7 @@ gflags.DEFINE_enum('mode', 'train', ['train', 'test'], 'as shown')
 gflags.DEFINE_bool('__ae__', False, 'Train an autoencoder')
 gflags.DEFINE_bool('dump_highlights', True, 'dump generated highlights in test mode')
 gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
-gflags.DEFINE_bool('reverse_output', False, 'Reverse output when predicting')
+gflags.DEFINE_bool('reverse_input', True, 'Reverse output when predicting')
 
 gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
 gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
@@ -163,6 +163,7 @@ def train(train_batches, valid_batches):
         with open(flags['func_input'], 'rb') as fin:
             dropout_switch, get_loss, update_params = cPickle.load(fin)
     
+    log_info({'type': 'function_ready'})
     # == Train loop ==
 
     best_model_path = ""

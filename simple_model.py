@@ -100,12 +100,8 @@ class SimpleRNN:
 
         max_sent_len = X[0].shape[0]
         n_sent_batch = X[0].shape[1]
-        ret = []
-        for i in xrange(n_sent_batch):
-            hid_i = self.encode(X[0][:, i].reshape((max_sent_len, 1)),
-                                X[1][:, i].reshape((max_sent_len, 1)))
-            ret_i = self.decoder.search(hid_i)
-            ret.append([(b[0], [b[2]]) for b in ret_i])
-
+        hid = self.encode(X[0], X[1])
+        ret = self.decoder.search_b(hid, self.flags['n_max_sent'], prune_res=False)
+        ret = [[(a[0], [a[2]]) for a in b] for b in ret]
         return ret
 
