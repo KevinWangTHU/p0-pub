@@ -1,3 +1,5 @@
+# TODO: allowed_words allowed to be None
+
 import cPickle
 import operator
 import numpy as np
@@ -50,6 +52,24 @@ def build_sent_batch(sentences_annotated, n_sent_batch, n_docs, max_doc_len):
     return all_sent_list, all_mask_list, doc_sent_pos
 
 
+def get_allowed_words(cur_docs, n_vocab, n_tot_vocab):
+    """
+    @cur_docs:  [([[t for t in sent] for sent in doc], [[t for t in sent] for sent in highlights]) for _ in doc_batch]
+    """
+    # TODO: Hand-gen dict is sorted by frequency. fix this when using glove.
+    all_tokens = concat(concat(concat(cur_docs)))
+    all_tokens = set(all_tokens)
+    size = len(all_tokens)
+    assert size + 100 < n_vocab
+    for i in xrange(n_tot_vocab):
+        if size == n_vocab:
+            break
+        if not i in all_tokens:
+            all_tokens.add(i)
+            size += 1
+    return list(all_tokens)
+
+
 def build_input(docs, flags):
     """
     @return:    [(id, 
@@ -63,8 +83,6 @@ def build_input(docs, flags):
     """
 
     n_docs = []
-
-    
 
     if not flags['simplernn']:
         # Sort documents by number of sentences
@@ -96,11 +114,15 @@ def build_input(docs, flags):
     batches = []
     n_doc_batch = flags['n_doc_batch']
     n_sent_batch = flags['n_sent_batch']
+    allow_all_words = np.array(list(xrange(0, flags['n_vocab']))).astype('q')
     for i in xrange(0, len(n_docs), n_doc_batch):
         cur_docs = n_docs[i: i+n_doc_batch]
 
         # remove paragraph structure that is not yet utilized 
         cur_docs = [(concat(p), concat(h)) for p, h in cur_docs]
+        
+        # allowed_words
+        allowed_words = get_allowed_words(cur_docs, flags['n_out_vocab'], flags['n_vocab'])
         
         # Document
         # - doc_mask
@@ -132,21 +154,29 @@ def build_input(docs, flags):
             hl_doc_mask[:cur_hl_lens[j], j] = 1
 
         # - data & sent_mask
+        dict_allowed_words = dict([(w, _) for _, w in enumerate(allowed_words)])
+
         max_hl_sent_len = reduce(max, [max([len(s) for s in hl]) for _, hl in cur_docs])
         hl_sent_data = np.zeros((max(cur_hl_lens), max_hl_sent_len, len(cur_docs)), dtype=np.int64)
         hl_sent_mask = np.zeros((max(cur_hl_lens), max_hl_sent_len, len(cur_docs)), dtype=np.float32)
+        hl_sent_data_train = np.zeros((max(cur_hl_lens), max_hl_sent_len, len(cur_docs)), dtype=np.int64)
+
         for doc_id, (_, hl) in enumerate(cur_docs):
             for hl_id, hl_sent in enumerate(hl):
                 for tok_id, token in enumerate(hl_sent):
                     if token >= flags['n_out_vocab']:
                         token = 0 # <UNK>
                     hl_sent_data[hl_id, tok_id, doc_id] = token
+                    hl_sent_data_train[hl_id, tok_id, doc_id] = dict_allowed_words[token]
                     hl_sent_mask[hl_id, tok_id, doc_id] = 1.
-        
+
+        allowed_words = np.array(allowed_words).astype('q')
         train_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
-                       hl_sent_data, hl_sent_mask, hl_doc_mask)
+                       hl_sent_data_train, hl_sent_mask, hl_doc_mask, allowed_words)
+        valid_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
+                       hl_sent_data, hl_sent_mask, hl_doc_mask, allow_all_words)
         highlights = [h for d, h in cur_docs]
-        batches.append((i, train_input, highlights))
+        batches.append((i, train_input, valid_input, highlights))
 
     log_info({'type': 'data', 'value': 'data loaded'})
     return batches
@@ -166,9 +196,15 @@ def load_data(flags):
 def load_test_data(flags):
     with open(flags['train_data'] + '.train') as fin:
         all_docs = cPickle.load(fin)
-    np.random.seed(7297)
-    np.random.shuffle(all_docs)
-    split = len(all_docs) * 4 / 5
-    ret = build_input(all_docs[-100:], flags)
+
+    if not flags['use_full_test_set']:
+        np.random.seed(7297)
+        np.random.shuffle(all_docs)
+        split = len(all_docs) * 4 / 5
+        all_docs = all_docs[-100:]
+        with open('test_last.train', 'w') as fout:
+            cPickle.dump(all_docs, fout)
+
+    ret = build_input(all_docs, flags)
     np.random.shuffle(ret)
     return ret

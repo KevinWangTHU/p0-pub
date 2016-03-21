@@ -31,6 +31,16 @@ def init_matrix_u(shape, name='', pdict=None):
     return theano.shared(np.random.uniform(-m, +m, shape).astype('f'), name=name)
 
 
+def gen_ruler(n):
+    """
+    return: lvector((n, )) of value [0, 1, ..., n-1]
+    """
+    ruler, _ = theano.scan(fn = lambda pre: pre+1,
+                           outputs_info = [T.cast(T.alloc(-1), 'int64')],
+                           n_steps = n)
+    return ruler
+
+
 def concat(l):
     return reduce(operator.add, l)
 

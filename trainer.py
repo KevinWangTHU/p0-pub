@@ -25,6 +25,8 @@ gflags.DEFINE_bool('__ae__', False, 'Train an autoencoder')
 gflags.DEFINE_bool('dump_highlights', True, 'dump generated highlights in test mode')
 gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
 gflags.DEFINE_bool('reverse_input', True, 'Reverse output when predicting')
+gflags.DEFINE_bool('lvt', True, 'Apply large-vocabulary trick')
+gflags.DEFINE_bool('attend_pos', True, 'Concatenate sentence position info when computing attention probabilities')
 
 gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
 gflags.DEFINE_integer('n_hidden', 200, 'Dimension of hidden layer')
@@ -54,6 +56,7 @@ gflags.DEFINE_string('dump_prefix', '-', 'as shown; - for autocreate')
 gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
 gflags.DEFINE_string('train_data', './data/100k', 'path of training data')
 gflags.DEFINE_bool('test_value', False, 'Compute test value of theano') # Issue with MRG
+gflags.DEFINE_bool('use_full_test_set', False, 'dataproc.load_test_data()')
 
 
 flags = None
@@ -70,6 +73,7 @@ def compile_functions(model):
     Y_data = T.ltensor3('Y_data')
     Y_mask = T.ftensor3('Y_mask')
     Y_mask_d = T.fmatrix('Y_mask_d')
+    allowed_words = T.lvector('allowed_words')
 
     if flags['test_value']:
         theano.config.compute_test_value = 'warn'
@@ -87,9 +91,15 @@ def compile_functions(model):
         Y_data.tag.test_value = np.zeros((n_sent, sent_len, doc_batch_size), dtype=np.int64)
         Y_mask.tag.test_value = np.ones((n_sent, sent_len, doc_batch_size), dtype=np.float32)
         Y_mask_d.tag.test_value = np.ones((n_sent, doc_batch_size), dtype=np.float32)
+        allowed_words.tag.test_value = np.ones((17, ), dtype=np.int64)
+        model.dropout.switch.set_value(0.)
+
+    if not flags['lvt']:
+        allowed_words = None
+        # TODO: modify code below.
 
     params, loss, grad, rng_updates = \
-            model.train([X_data, X_mask, X_pos, X_mask_d], [Y_data, Y_mask, Y_mask_d])
+            model.train([X_data, X_mask, X_pos, X_mask_d], [Y_data, Y_mask, Y_mask_d], allowed_words)
     lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
 #    params = model.get_params()
@@ -98,7 +108,7 @@ def compile_functions(model):
 #    rng_updates = theano.OrderedUpdates()
 #    lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
-    get_loss = theano.function([X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d],
+    get_loss = theano.function([X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d, allowed_words],
                                loss,
                                updates = rng_updates + OrderedDict(zip(grad_shared, grad)),
                                on_unused_input = 'warn',
@@ -114,11 +124,13 @@ def compile_functions(model):
 
 
 def test_model(model, test_batches):
+    import IPython
     bleus = []
     generated_highlights = []
     model.dropout.switch.set_value(0.)
-    for batch_id, b, data_hlts in test_batches:
-        model_hlts = model.test(b[0:4]) # ~ [[(float(LogP), [[int] * n_hlts])] * n_beam] * n_batch
+    for batch_id, _, b, data_hlts in test_batches:
+        model_hlts = model.test(b[0:4], 5, flags['n_max_sent']) # ~ [[(float(LogP), [[int] * n_hlts])] * n_beam] * n_batch
+        IPython.embed()
         model_hlts = [hl[0][1] for hl in model_hlts]  # Remove all but the most probable text
         generated_highlights += model_hlts
         for model_hlt, data_hlt in zip(model_hlts, data_hlts):
@@ -174,7 +186,7 @@ def train(train_batches, valid_batches):
         t_loss = []
         v_loss = []
         dropout_switch.set_value(1.0) # 1{use_dropout}
-        for batch_id, b, _ in train_batches:
+        for batch_id, b, _, _ in train_batches:
             #
             while True: 
                 # Hack for memory shortage. NOTE: The random state may be affected
@@ -195,7 +207,7 @@ def train(train_batches, valid_batches):
             log_info({'type': 'batch', 'id': batch_id, 'loss': float(np.mean(t_loss))})
 
         dropout_switch.set_value(0.0) 
-        for batch_id, b, _ in valid_batches:
+        for batch_id, _, b, _ in valid_batches:
             while True:
                 try:
                     b_loss = get_loss(*b)
