@@ -122,7 +122,9 @@ def build_input(docs, flags):
         cur_docs = [(concat(p), concat(h)) for p, h in cur_docs]
         
         # allowed_words
-        allowed_words = get_allowed_words(cur_docs, flags['n_out_vocab'], flags['n_vocab'])
+        if flags['lvt']:
+            allowed_words = get_allowed_words(cur_docs, flags['n_out_vocab'], flags['n_vocab'])
+            dict_allowed_words = dict([(w, _) for _, w in enumerate(allowed_words)])
         
         # Document
         # - doc_mask
@@ -154,8 +156,6 @@ def build_input(docs, flags):
             hl_doc_mask[:cur_hl_lens[j], j] = 1
 
         # - data & sent_mask
-        dict_allowed_words = dict([(w, _) for _, w in enumerate(allowed_words)])
-
         max_hl_sent_len = reduce(max, [max([len(s) for s in hl]) for _, hl in cur_docs])
         hl_sent_data = np.zeros((max(cur_hl_lens), max_hl_sent_len, len(cur_docs)), dtype=np.int64)
         hl_sent_mask = np.zeros((max(cur_hl_lens), max_hl_sent_len, len(cur_docs)), dtype=np.float32)
@@ -167,14 +167,19 @@ def build_input(docs, flags):
                     if token >= flags['n_out_vocab']:
                         token = 0 # <UNK>
                     hl_sent_data[hl_id, tok_id, doc_id] = token
-                    hl_sent_data_train[hl_id, tok_id, doc_id] = dict_allowed_words[token]
                     hl_sent_mask[hl_id, tok_id, doc_id] = 1.
+                    if flags['lvt']:
+                        hl_sent_data_train[hl_id, tok_id, doc_id] = dict_allowed_words[token]
 
-        allowed_words = np.array(allowed_words).astype('q')
         train_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
-                       hl_sent_data_train, hl_sent_mask, hl_doc_mask, allowed_words)
+                       hl_sent_data, hl_sent_mask, hl_doc_mask)
         valid_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
-                       hl_sent_data, hl_sent_mask, hl_doc_mask, allow_all_words)
+                       hl_sent_data, hl_sent_mask, hl_doc_mask)
+        if flags['lvt']:
+            train_input[4] = hl_sent_data_train
+            train_input.append(np.array(allowed_words).astype('q'))
+            valid_input.append(allow_all_words)
+
         highlights = [h for d, h in cur_docs]
         batches.append((i, train_input, valid_input, highlights))
 
@@ -189,6 +194,9 @@ def load_data(flags):
     np.random.seed(7297)
     np.random.shuffle(all_docs)
     split = len(all_docs) * 4 / 5
+    if flags['trunc_data']:
+        all_docs = all_docs[split-50: split+50]
+        split = 50
     return build_input(all_docs[:split], flags), \
            build_input(all_docs[split:], flags)
 
@@ -197,7 +205,7 @@ def load_test_data(flags):
     with open(flags['train_data'] + '.train') as fin:
         all_docs = cPickle.load(fin)
 
-    if not flags['use_full_test_set']:
+    if flags['trunc_data']:
         np.random.seed(7297)
         np.random.shuffle(all_docs)
         split = len(all_docs) * 4 / 5

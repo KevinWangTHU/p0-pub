@@ -2,6 +2,7 @@ import sys
 import theano
 import theano.tensor as T
 import numpy as np
+import cPickle
 
 import lstm
 import optimizer
@@ -155,20 +156,20 @@ class WordDecoder:
             ruler = flags['n_out_vocab'] * gen_ruler(n_batch)
 
         # Use top hidden layer to compute probabilities
-        def step(h_t, exp_word_t, exp_mask_t, dropout_mask, embed_sel, b_sel, *args):
+        def step(h_t, exp_word_t, exp_mask_t, dropout_mask, embed_l, b_l, *args):
             """
             @param h_t:      T(n_batch, n_hidden), hidden block of last level
             """
             h_t = self.dropout(h_t, dropout_mask)
-            act_word = T.nnet.softmax(T.dot(T.dot(h_t, self.W0) + self.b0, embed_sel.T) + b_sel)
+            act_word = T.nnet.softmax(T.dot(T.dot(h_t, self.W0) + self.b0, embed_l.T) + b_l)
             prob = T.flatten(act_word)[exp_word_t + ruler] + 1e-6
             log_prob = exp_mask_t * T.log(prob)
             return log_prob
         
-        if output_words:
-            embed_sel, b_sel = self.embed[output_words], self.b[output_words]
+        if output_words: 
+            embed_l, b_l = self.embed[output_words], self.b[output_words]
         else:
-            embed, b = self.embed, self.b
+            embed_l, b_l = self.embed, self.b # l for local
 
         dropout_masks = self.dropout.prep_mask(
                 (hiddens.shape[0], hiddens.shape[1], hiddens.shape[2]))
@@ -176,7 +177,7 @@ class WordDecoder:
                 fn=step, 
                 sequences=[hiddens, exp_word, exp_mask, dropout_masks],
                 outputs_info=None,
-                non_sequences=[embed_sel, b_sel, self.W0, self.b0, self.b, ruler] + [self.dropout.switch],
+                non_sequences=[embed_l, b_l, self.W0, self.b0, self.b, ruler] + [self.dropout.switch],
                 strict=True)
 
         prob = T.sum(probs, axis=0)
@@ -285,7 +286,12 @@ class SoftDecoder:
         self.encoder = SentEncoder(pdict, self.dropout)
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'] + flags['n_context'], flags['n_hidden'], 
                              self.dropout, 'softdec_rnn', pdict)
+
+        if not 'embed' in pdict and flags['wordvec']: # Use pre-trained wordvec.
+            with open(flags['wordvec']) as fin:
+                pdict['embed'] = cPickle.load(fin)
         self.embed = init_matrix_u((flags['n_vocab'], flags['n_embed']), 'embed', pdict)
+
         self.decoder = WordDecoder(self.embed, pdict, self.dropout)
 
     def save(self, file_):

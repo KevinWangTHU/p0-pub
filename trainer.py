@@ -25,7 +25,7 @@ gflags.DEFINE_bool('__ae__', False, 'Train an autoencoder')
 gflags.DEFINE_bool('dump_highlights', True, 'dump generated highlights in test mode')
 gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
 gflags.DEFINE_bool('reverse_input', True, 'Reverse output when predicting')
-gflags.DEFINE_bool('lvt', True, 'Apply large-vocabulary trick')
+gflags.DEFINE_bool('lvt', False, 'Apply large-vocabulary trick')
 gflags.DEFINE_bool('attend_pos', True, 'Concatenate sentence position info when computing attention probabilities')
 
 gflags.DEFINE_integer('n_embed', 100, 'Dimension of word embedding')
@@ -54,9 +54,10 @@ gflags.DEFINE_bool('func_output', False, 'Dump function if compiled')
 gflags.DEFINE_string('func_input', '', 'Use compiled function if valid')
 gflags.DEFINE_string('dump_prefix', '-', 'as shown; - for autocreate')
 gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
+gflags.DEFINE_string('wordvec', None, 'Pre-trained word vector file. Check data/proc for format.')
 gflags.DEFINE_string('train_data', './data/100k', 'path of training data')
 gflags.DEFINE_bool('test_value', False, 'Compute test value of theano') # Issue with MRG
-gflags.DEFINE_bool('use_full_test_set', False, 'dataproc.load_test_data()')
+gflags.DEFINE_bool('trunc_data', False, 'Use ~100 docs for quick test')
 
 
 flags = None
@@ -96,10 +97,10 @@ def compile_functions(model):
 
     if not flags['lvt']:
         allowed_words = None
-        # TODO: modify code below.
 
     params, loss, grad, rng_updates = \
-            model.train([X_data, X_mask, X_pos, X_mask_d], [Y_data, Y_mask, Y_mask_d], allowed_words)
+            model.train([X_data, X_mask, X_pos, X_mask_d],
+                        [Y_data, Y_mask, Y_mask_d], allowed_words)
     lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
 #    params = model.get_params()
@@ -108,18 +109,20 @@ def compile_functions(model):
 #    rng_updates = theano.OrderedUpdates()
 #    lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
-    get_loss = theano.function([X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d, allowed_words],
+    func_params = [X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d]
+    if allowed_words:
+        func_params.append(allowed_words)
+
+    get_loss = theano.function(func_params,
                                loss,
                                updates = rng_updates + OrderedDict(zip(grad_shared, grad)),
-                               on_unused_input = 'warn',
+                               on_unused_input = 'warn', # Take care
                                name = 'get_loss')
-
     update_params = theano.function([lr], [],
                                     updates = opt_updates,
                                     name = 'do_optimize')
 
     model.init_rng()
-
     return get_loss, update_params
 
 
