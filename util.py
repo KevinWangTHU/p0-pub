@@ -31,6 +31,13 @@ def init_matrix_u(shape, name='', pdict=None):
     return theano.shared(np.random.uniform(-m, +m, shape).astype('f'), name=name)
 
 
+def batch_entropy(att):
+    """
+    batched entropy for multinomials
+    """
+    return T.sum(att * T.log(att + 1e-7) + (1 - att) * T.log(1 - att + 1e-7))
+
+
 def gen_ruler(n):
     """
     return: lvector((n, )) of value [0, 1, ..., n-1]

@@ -39,6 +39,7 @@ gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
 gflags.DEFINE_integer('n_beam', 5, 'Number of candidates in beam search')
 gflags.DEFINE_integer('n_max_sent', 30, 'Maximum sentence length allowed in beam search')
+gflags.DEFINE_float('w_entropy', 0.05, 'Penalty for att weight entropy. Only used in SentExtractor.') # max-ent ~ 5
 gflags.DEFINE_float('dropout_prob', 0.2, 'Pr[drop_unit]')
 gflags.DEFINE_bool('clip_grads', True, 'Clip gradients')
 gflags.DEFINE_float('max_grad_norm', 5, 'Maximum gradient norm allowed (divided by batch_size)')
