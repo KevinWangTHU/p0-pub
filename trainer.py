@@ -39,6 +39,7 @@ gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
 gflags.DEFINE_integer('n_beam', 5, 'Number of candidates in beam search')
 gflags.DEFINE_integer('n_max_sent', 30, 'Maximum sentence length allowed in beam search')
+# gflags.DEFINE_float('w_entropy', 0.05, 'Penalty for att weight entropy. Only used in SentExtractor.') # max-ent ~ 5
 gflags.DEFINE_float('dropout_prob', 0.2, 'Pr[drop_unit]')
 gflags.DEFINE_bool('clip_grads', True, 'Clip gradients')
 gflags.DEFINE_float('max_grad_norm', 5, 'Maximum gradient norm allowed (divided by batch_size)')
@@ -55,7 +56,7 @@ gflags.DEFINE_string('func_input', '', 'Use compiled function if valid')
 gflags.DEFINE_string('dump_prefix', '-', 'as shown; - for autocreate')
 gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
 gflags.DEFINE_string('wordvec', None, 'Pre-trained word vector file. Check data/proc for format.')
-gflags.DEFINE_string('train_data', './data/100k', 'path of training data')
+gflags.DEFINE_string('train_data', './data/100k3', 'path of training data')
 gflags.DEFINE_bool('test_value', False, 'Compute test value of theano') # Issue with MRG
 gflags.DEFINE_bool('trunc_data', False, 'Use ~100 docs for quick test')
 
@@ -165,10 +166,13 @@ def train(train_batches, valid_batches):
     np.random.seed(7297)
 
     # == Compile ==
-    if flags['compile']: 
+    if flags['compile']:
+        log_info({'type': 'here'})
         model = new_model()
+        log_info({'type': 'here'})
         dropout_switch = model.dropout.switch
         get_loss, update_params = compile_functions(model)
+        log_info({'type': 'here'})
         if flags['func_output']:
             out_path = flags['dump_prefix'] + "_fn.pickle"
             sys.setrecursionlimit(1048576)
@@ -177,7 +181,7 @@ def train(train_batches, valid_batches):
     else:
         with open(flags['func_input'], 'rb') as fin:
             dropout_switch, get_loss, update_params = cPickle.load(fin)
-    
+
     log_info({'type': 'function_ready'})
     # == Train loop ==
 
@@ -185,13 +189,13 @@ def train(train_batches, valid_batches):
     best_valid_loss = 1e100
     for epoch in xrange(flags['n_epochs']):
         np.random.shuffle(train_batches)
-         
+
         t_loss = []
         v_loss = []
         dropout_switch.set_value(1.0) # 1{use_dropout}
         for batch_id, b, _, _ in train_batches:
             #
-            while True: 
+            while True: # question
                 # Hack for memory shortage. NOTE: The random state may be affected
                 try:
                     b_loss = get_loss(*b)

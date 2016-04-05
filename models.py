@@ -24,19 +24,20 @@ class Attention:
         prob = T.batched_dot(T.dot(x, W), y) + T.dot(x, xb) + T.dot(y, yb).dimshuffle(0, 'x')
         prob = T.nnet.softmax(prob)
         context = T.batched_dot(prob, x)               # (batch_size, s0)
-        return T.dot(context, U), prob
+        context = T.dot(context, U) if U else None
+        return context, prob
 
 
-    def __init__(self, s0, s1, s2, att_type, pref, pdict):
+    def __init__(self, s0, s1, s2, att_type, pref, pdict, no_context=False):
         """
         s1 should be > s2 to encourage sparsity
         """
         if att_type == 'bilinear':
             self.W = init_matrix_u((s0, s1), pref + '_W', pdict)
-            self.U = init_matrix_u((s0, s2), pref + '_U', pdict) 
+            self.U = init_matrix_u((s0, s2), pref + '_U', pdict) if not no_context else None 
             self.xb = init_matrix_u((s0,), pref + '_xb', pdict)
             self.yb = init_matrix_u((s1,), pref + '_yb', pdict)
-            self.get_params = lambda: [self.W, self.U, self.xb, self.yb]
+            self.get_params = lambda: [self.W, self.xb, self.yb] + ([self.U] if not no_context else [])
             self.__call__ = lambda x, y: Attention.bilinear_fn(x, y, self.W, self.U, self.xb, self.yb)[0]
             self.get_prob = lambda x, y: Attention.bilinear_fn(x, y, self.W, self.U, self.xb, self.yb)[1]
         else:
@@ -287,7 +288,7 @@ class SoftDecoder:
         self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'] + flags['n_context'], flags['n_hidden'], 
                              self.dropout, 'softdec_rnn', pdict)
 
-        if not 'embed' in pdict and flags['wordvec']: # Use pre-trained wordvec.
+        if not (pdict and 'embed' in pdict) and flags['wordvec']: # Use pre-trained wordvec.
             with open(flags['wordvec']) as fin:
                 pdict['embed'] = cPickle.load(fin)
         self.embed = init_matrix_u((flags['n_vocab'], flags['n_embed']), 'embed', pdict)

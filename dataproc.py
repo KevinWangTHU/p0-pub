@@ -72,12 +72,12 @@ def get_allowed_words(cur_docs, n_vocab, n_tot_vocab):
 
 def build_input(docs, flags):
     """
-    @return:    [(id, 
-                  (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
+    @return:    [(id,
+                  (concated_sent, concated_mask, doc_sent_pos, doc_mask,
                    hl_sent_data, hl_sent_mask, hl_doc_mask),
                   original highlights ([[[int] for highlight in doc] for doc in batch]))
                  for each batch]
-                if flags['simplernn'] == True, 
+                if flags['simplernn'] == True,
                     all sentences will be concatenated in a document, and
                     concated_sent[:, i] corresponds to the ith document.
     """
