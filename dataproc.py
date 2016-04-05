@@ -1,5 +1,3 @@
-# TODO: allowed_words allowed to be None
-
 import cPickle
 import operator
 import numpy as np
@@ -86,21 +84,21 @@ def build_input(docs, flags):
 
     if not flags['simplernn']:
         # Sort documents by number of sentences
-        for doc, highlight in docs:
+        for (doc, highlight), score in docs:
             n_sent = sum([len(para) for para in doc])
-            n_docs.append((n_sent, doc, highlight))
+            n_docs.append((n_sent, (doc, highlight), score))
     else:
         # Single-layer RNN
         # Concatenate all paragraphs & sentences (keeping the list hierarchy), 
         # and sort wrt number of words.
-        for doc, highlight in docs:
+        for (doc, highlight), score in docs:
             highlight = [[concat(concat(highlight))]]
             if not flags['__ae__']:
                 doc = [[concat(concat(doc))]]
             else: # highlight := doc
                 doc = copy.deepcopy(highlight)
             n_word = len(doc[0][0])
-            n_docs.append((n_word, doc, highlight))
+            n_docs.append((n_word, (doc, highlight), score))
             
     n_docs.sort(key=lambda x: x[0])
     n_docs = [x[1:] for x in n_docs]            
@@ -108,7 +106,7 @@ def build_input(docs, flags):
     if flags['reverse_input']:
         revdoc = lambda doc: \
             [[list(reversed(sentence)) for sentence in reversed(paragraph)] for paragraph in reversed(doc)]
-        n_docs = [(revdoc(doc), hlt) for doc, hlt in n_docs]
+        n_docs = [((revdoc(doc), hlt), score) for (doc, hlt), score in n_docs]
 
     # Build batches
     batches = []
@@ -116,7 +114,8 @@ def build_input(docs, flags):
     n_sent_batch = flags['n_sent_batch']
     allow_all_words = np.array(list(xrange(0, flags['n_vocab']))).astype('q')
     for i in xrange(0, len(n_docs), n_doc_batch):
-        cur_docs = n_docs[i: i+n_doc_batch]
+        cur_docs = [dc[0] for dc in n_docs[i: i+n_doc_batch]]
+        cur_score = [dc[1] for dc in n_docs[i: i+n_doc_batch]]
 
         # remove paragraph structure that is not yet utilized 
         cur_docs = [(concat(p), concat(h)) for p, h in cur_docs]
@@ -175,11 +174,23 @@ def build_input(docs, flags):
                        hl_sent_data, hl_sent_mask, hl_doc_mask)
         valid_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask, 
                        hl_sent_data, hl_sent_mask, hl_doc_mask)
-        if flags['lvt']:
-            train_input[4] = hl_sent_data_train
-            train_input.append(np.array(allowed_words).astype('q'))
-            valid_input.append(allow_all_words)
 
+        if flags['lvt']:
+            train_input = train_input[:4] + (hl_sent_data_train,) + train_input[5:]
+            train_input += (np.array(allowed_words).astype('q'), )
+            valid_input += (allow_all_words, )
+
+        if flags['sent_extractor']:
+            # - matching score
+            scores = np.zeros((max(cur_hl_lens), len(cur_docs), max_doc_len), dtype='float32')
+            for i, score_i in enumerate(cur_score):
+                for j in xrange(score_i.shape[0]):
+                    for k in xrange(score_i.shape[1]):
+                        scores[k, i, j] = score_i[j, k]
+            train_input += (scores, )
+            valid_input += (scores, )
+
+        # - original highlight for debugging
         highlights = [h for d, h in cur_docs]
         batches.append((i, train_input, valid_input, highlights))
 

@@ -13,7 +13,8 @@ class SentExtractor:
     def get_params(self):
         return self.attention.get_params() + self.rnn.get_params() + self.encoder.get_params() + [self.embed]
     
-    def __init__(self, pdict):
+    def __init__(self):
+        global flags
         flags = models.flags
         # Load parameters if required
         if flags['load_npz'].strip() != "":
@@ -113,10 +114,23 @@ class SentExtractor:
         
         [_, _, reward_x, ent_x], upd_x = scan(lambda *args: self.att_step_x(*args))
         [_, _, reward_y, ent_y], upd_y = scan(lambda *args: self.att_step_y(*args))
-        obj = alpha * T.sum(reward_x) + (1 - alpha) * T.sum(reward_y)\
-            + (alpha * T.sum(ent_x) + (1 - alpha) * T.sum(ent_y)) * flags['w_entropy'] # TODO
+        obj = alpha * T.sum(reward_x) + (1 - alpha) * T.sum(reward_y)
+        obj_ent = (alpha * T.sum(ent_x) + (1 - alpha) * T.sum(ent_y)) * flags['w_entropy']
+        obj = theano.printing.Print('obj')(T.mean(obj))
+        obj_ent = theano.printing.Print('obj_ent')(T.mean(obj_ent))
+        obj += obj_ent
         loss = -obj / T.cast(batch_size, 'float32')
         grad = T.grad(-loss, self.get_params()) 
         rng_updates = upd_x + upd_y
         
         return self.get_params(), loss, grad, rng_updates
+
+    def init_rng(self):
+        """
+        Restore theano rng state. Must be called _after_ compilation
+        """
+        if flags['load_npz'].strip() != "":
+            self.dropout.rng.rstate = self.pdict['__theano_mrg_rstate__']
+            for (su2, su1) in zip(self.dropout.rng.state_updates, self.pdict['__theano_mrg_state_updates__'][0]):
+                su2[0].set_value(su1[0].get_value())
+

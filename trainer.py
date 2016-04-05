@@ -16,6 +16,7 @@ from collections import OrderedDict
 import optimizer
 import models
 import simple_model
+import sent_extractor
 import dataproc
 from util import *
 
@@ -24,6 +25,7 @@ gflags.DEFINE_enum('mode', 'train', ['train', 'test'], 'as shown')
 gflags.DEFINE_bool('__ae__', False, 'Train an autoencoder')
 gflags.DEFINE_bool('dump_highlights', True, 'dump generated highlights in test mode')
 gflags.DEFINE_bool('simplernn', False, 'Use SimpleRNN')
+gflags.DEFINE_bool('sent_extractor', False, 'Use SimpleRNN')
 gflags.DEFINE_bool('reverse_input', True, 'Reverse output when predicting')
 gflags.DEFINE_bool('lvt', False, 'Apply large-vocabulary trick')
 gflags.DEFINE_bool('attend_pos', True, 'Concatenate sentence position info when computing attention probabilities')
@@ -39,8 +41,10 @@ gflags.DEFINE_integer('n_sent_batch', 20, 'Batch size of sentences in a document
 gflags.DEFINE_integer('n_epochs', 10, 'Number of epochs')
 gflags.DEFINE_integer('n_beam', 5, 'Number of candidates in beam search')
 gflags.DEFINE_integer('n_max_sent', 30, 'Maximum sentence length allowed in beam search')
-gflags.DEFINE_float('w_entropy', 0.05, 'Penalty for att weight entropy. Only used in SentExtractor.') # max-ent ~ 5
-gflags.DEFINE_float('dropout_prob', 0.2, 'Pr[drop_unit]')
+gflags.DEFINE_float('w_entropy', 1e-3, 'Penalty for att weight entropy. Only used in SentExtractor.') # max-ent ~ 5
+gflags.DEFINE_integer('alpha_half_time', 90000, 'Decay half-time (in #iters) for mixing factor in SentExtractor')
+gflags.DEFINE_integer('alpha_decay_every', 10000, 'Period to reduce alpha')
+gflags.DEFINE_float('dropout_prob', 0.3, 'Pr[drop_unit]')
 gflags.DEFINE_bool('clip_grads', True, 'Clip gradients')
 gflags.DEFINE_float('max_grad_norm', 5, 'Maximum gradient norm allowed (divided by batch_size)')
 
@@ -76,6 +80,9 @@ def compile_functions(model):
     Y_mask = T.ftensor3('Y_mask')
     Y_mask_d = T.fmatrix('Y_mask_d')
     allowed_words = T.lvector('allowed_words')
+    # sent_extractor
+    score = T.ftensor3('score')
+    alpha = T.fscalar('alpha')
 
     if flags['test_value']:
         theano.config.compute_test_value = 'warn'
@@ -94,14 +101,22 @@ def compile_functions(model):
         Y_mask.tag.test_value = np.ones((n_sent, sent_len, doc_batch_size), dtype=np.float32)
         Y_mask_d.tag.test_value = np.ones((n_sent, doc_batch_size), dtype=np.float32)
         allowed_words.tag.test_value = np.ones((17, ), dtype=np.int64)
+        score.tag.test_value = np.ones((n_sent+1, doc_batch_size, n_sent), dtype=np.float32)
+        alpha.tag.test_value = 0.5
         model.dropout.switch.set_value(0.)
 
     if not flags['lvt']:
         allowed_words = None
 
-    params, loss, grad, rng_updates = \
-            model.train([X_data, X_mask, X_pos, X_mask_d],
-                        [Y_data, Y_mask, Y_mask_d], allowed_words)
+    if flags['sent_extractor']:
+        params, loss, grad, rng_updates = \
+                model.train([X_data, X_mask, X_pos, X_mask_d],
+                            [Y_data, Y_mask, Y_mask_d], score, alpha)
+    else:
+        params, loss, grad, rng_updates = \
+                model.train([X_data, X_mask, X_pos, X_mask_d],
+                            [Y_data, Y_mask, Y_mask_d], allowed_words)
+
     lr, grad_shared, opt_updates = optimizer.optimize(params, {}, flags) 
 
 #    params = model.get_params()
@@ -113,6 +128,8 @@ def compile_functions(model):
     func_params = [X_data, X_mask, X_pos, X_mask_d, Y_data, Y_mask, Y_mask_d]
     if allowed_words:
         func_params.append(allowed_words)
+    if flags['sent_extractor']:
+        func_params += [score, alpha]
 
     get_loss = theano.function(func_params,
                                loss,
@@ -128,6 +145,7 @@ def compile_functions(model):
 
 
 def test_model(model, test_batches):
+    # TODO: modify for sent_extractor
     import IPython
     bleus = []
     generated_highlights = []
@@ -155,7 +173,9 @@ def test_model(model, test_batches):
 
 
 def new_model():
-    if flags['simplernn']:
+    if flags['sent_extractor']:
+        return sent_extractor.SentExtractor()
+    elif flags['simplernn']:
         return simple_model.SimpleRNN(flags)
     else:
         return models.SoftDecoder()
@@ -184,6 +204,8 @@ def train(train_batches, valid_batches):
 
     best_model_path = ""
     best_valid_loss = 1e100
+    alpha_se = 1.0
+    n_total_iter = 0
     for epoch in xrange(flags['n_epochs']):
         np.random.shuffle(train_batches)
          
@@ -191,6 +213,11 @@ def train(train_batches, valid_batches):
         v_loss = []
         dropout_switch.set_value(1.0) # 1{use_dropout}
         for batch_id, b, _, _ in train_batches:
+            n_total_iter += 1
+            if n_total_iter % flags['alpha_decay_every'] == 0:
+                alpha_se *= 0.5 ** (flags['alpha_decay_every'] / float(flags['alpha_half_time']))
+            if flags['sent_extractor']: # Append alpha
+                b = b + (alpha_se,)
             #
             while True: 
                 # Hack for memory shortage. NOTE: The random state may be affected
@@ -212,6 +239,9 @@ def train(train_batches, valid_batches):
 
         dropout_switch.set_value(0.0) 
         for batch_id, _, b, _ in valid_batches:
+            if flags['sent_extractor']: # Append alpha
+                b = b + (alpha_se,)
+            #
             while True:
                 try:
                     b_loss = get_loss(*b)
