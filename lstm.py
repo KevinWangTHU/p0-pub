@@ -57,7 +57,7 @@ class LSTM:
             f = T.nnet.sigmoid(slice_(pre_activation, 1))
             i = T.nnet.sigmoid(slice_(pre_activation, 2))
             c_tilde = T.tanh(slice_(pre_activation, 3))
-            c = T.shape_padright(xm_t) * i * c_tilde + f * pre_c[l]
+            c = T.shape_padright(xm_t) * (i * c_tilde + f * pre_c[l])
             h = T.shape_padright(xm_t) * o * T.tanh(c)
             cs.append(c)
             hs.append(h)
