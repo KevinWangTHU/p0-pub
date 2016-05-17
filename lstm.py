@@ -14,7 +14,7 @@ class LSTM:
         return self.params
 
     def __init__(self,
-                 n_layers, n_input, n_hidden, 
+                 n_layers, n_input, n_hidden,
                  dropout,
                  pref, pdict):
         self.n_layers = n_layers
@@ -29,7 +29,7 @@ class LSTM:
             self.b.append(init_matrix_u((n_hidden * 4, ), pref + '_b%d' % i, pdict))
             n_input = n_hidden
         self.params = self.W + self.U + self.b
-    
+
     def step(self, x_t, xm_t, dropout_mask, pre_c, pre_h, *gpu_args):
         """
         @param x_t:    T(n_batch, n_input)

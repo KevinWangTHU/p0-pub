@@ -6,21 +6,29 @@ import nltk
 import re
 import os
 import numpy as np
+from nltk.tokenize import StanfordTokenizer
 
 import gflags
+import sys
 
-gflags.DEFINE_string('root_path', './cnn/stories', 'directory containing all stories', short_name='p')
+reload(sys)
+sys.setdefaultencoding('utf8')
+
+# ${root_path}/stories & ${root_path}/highlights must exist
+gflags.DEFINE_string('root_path', './cnn', 'directory containing all stories', short_name='p')
 gflags.DEFINE_string('dump_prefix', './100k3', 'prefix of dict/data to be dumped', short_name='d')
 gflags.DEFINE_integer('max_vocab', 100000, 'Max vocabulary size (including markers added by this script)', short_name='mv')
 gflags.DEFINE_integer('max_tokens_per_sentence', None, '', short_name='mtps')
 gflags.DEFINE_integer('max_paragraphs_per_document', None, '', short_name='mppd')
+#gflags.DEFINE_string('dict', None, '', short_name='dic')
+gflags.DEFINE_string('dict', '/home/wzy/glove/glove/vectors.txt', '', short_name='dic')
+gflags.DEFINE_integer('n_embed', 100, '', short_name='ne')
+gflags.DEFINE_integer('n_tokenize_batch', 500, '', short_name='ntb')
 
 flags = gflags.FLAGS
 
-
-def process_text(file_path):
+def process_text_legacy(file_path):
     text = []
-    highlight = []
     with open(file_path) as fin:
         #
         lines = fin.readlines()
@@ -29,12 +37,7 @@ def process_text(file_path):
         #
         signs = re.compile('[\+\-\.\,\%]') # For digit removal
         sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
-        is_highlight = False
         for l in lines:
-            if l == '@highlight':
-                is_highlight = True
-                continue
-            #
             raw_sents = sent_tokenizer.tokenize(l.decode('utf-8'))
             sents = []
             for sent in raw_sents:
@@ -42,14 +45,49 @@ def process_text(file_path):
                 tokens = [unicode(w) if not signs.sub('', w).isdigit() else u'0' \
                           for w in tokens][:flags.max_tokens_per_sentence]
                 sents.append(tokens)
+            text.append(sents)
 
-            if is_highlight:
-                highlight.append(sents) 
-                is_highlight = False
-            else:
-                text.append(sents)
+    return text[:flags.max_paragraphs_per_document]
 
-    return text[:flags.max_paragraphs_per_document], highlight 
+
+tokenizer = StanfordTokenizer(path_to_jar='/home/wzy/stanford_parser/src/stanford-parser.jar')
+
+# Batched tokenization with Stanford tokenizer (Java startup is expensive)
+def batch_tokenize(file_paths):
+    to_be_tokenized = u""
+    for file_path in file_paths:
+        with open(file_path) as fin:
+            lines = fin.readlines()
+            lines = [l.strip() for l in lines]
+            lines = [l.decode() for l in lines if len(l) > 0]
+            lines = u'<para_end>\n'.join(lines)
+        to_be_tokenized += lines + '<doc_end>\n'
+
+    global tokenizer
+    tokens = tokenizer.tokenize(to_be_tokenized)
+    tokens = [tok.lower() for tok in tokens]
+    docs = u' '.join(tokens).split('<doc_end>')[:-1]
+    assert len(docs) == len(file_paths)
+    doc_lines = [doc.split('<para_end>') for doc in docs]
+    return doc_lines
+
+
+def process_lines(lines):
+    lines = filter(lambda x: len(x) > 0, lines)
+    text = []
+    signs = re.compile('[\+\-\.\,\%]') # Remove symbols in numbers
+    sent_tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
+    for l in lines:
+        raw_sents = sent_tokenizer.tokenize(l.decode('utf-8'))
+        sents = []
+        for sent in raw_sents:
+            tokens = sent.split(u' ')
+            tokens = filter(lambda x: len(x) > 0, tokens)
+            tokens = [unicode(w) if not signs.sub('', w).isdigit() else u'0' \
+                      for w in tokens][:flags.max_tokens_per_sentence]
+            sents.append(tokens)
+        text.append(sents)
+    return text[:flags.max_paragraphs_per_document]
 
 
 def update_wdict(doc, wdict):
@@ -71,6 +109,20 @@ def update_doc(doc, wdict):
     return ndoc
 
 
+def load_vecs(path):
+    with open(path) as fin:
+        lines = fin.readlines()
+        ret = []
+        wordmap = []
+        for i, line in enumerate(lines):
+            line = line.split(u' ')
+            word = line[0]
+            vec = [float(f) for f in line[1:]]
+            ret.append(vec)
+            wordmap.append((word, i))
+    return np.array(ret, dtype='float32'), dict(wordmap)
+
+
 def main():
     import sys
     from os.path import isfile, join, splitext
@@ -80,53 +132,70 @@ def main():
     sys.argv = flags(sys.argv)
     root_path = flags.root_path
     dump_prefix = flags.dump_prefix
-    
+
     # List stories in root_path
-    files = [join(root_path, f) for f in os.listdir(root_path) \
-             if isfile(join(root_path, f)) and splitext(join(root_path, f))[1] == '.story']
-    
+    story_root_path = join(root_path, 'stories')
+    stries = [join(story_root_path, f) for f in os.listdir(story_root_path) \
+               if isfile(join(story_root_path, f)) and splitext(join(story_root_path, f))[1] == '.story']
+    hlt_path = join(root_path, 'highlights')
+    hlts = [join(hlt_path, re.sub('.story$', '.highlight', f)) for f in os.listdir(story_root_path) \
+            if isfile(join(story_root_path, f)) and splitext(join(story_root_path, f))[1] == '.story']
+
     # Tokenize stories & init dict
-    stories = []
     wdict = {}
-    len_files = len(files)
+    len_files = len(stries)
     n_empty = 0
-    for i, story in enumerate(files):
+    stories = []
+    for i in xrange(0, len_files, flags.n_tokenize_batch):
         print >>sys.stderr, "\r%d/%d stories loaded" % (i, len_files),
-        text, highlight = process_text(story)
-        if len(text) == 0 or len(highlight) == 0:
-            n_empty += 1
-            continue
-        update_wdict(text, wdict)
-        update_wdict(highlight, wdict)
-        stories.append((text, highlight))
+        texts = batch_tokenize(stries[i: i+flags.n_tokenize_batch])
+        highlights = batch_tokenize(hlts[i: i+flags.n_tokenize_batch])
+        for (txt, hlt) in zip(texts, highlights):
+            if len(txt) == 0 or len(hlt) == 0:
+                n_empty += 1
+                continue
+            text = process_lines(txt)
+            highlight = process_lines(hlt)
+            update_wdict(text, wdict)
+            update_wdict(highlight, wdict)
+            stories.append((text, highlight))
     print >>sys.stderr, "\nStories loaded; %d empty stories excluded." % n_empty
-    
+
     # Remove infrequent words & add markers
     word_freqs = wdict.items()
     word_freqs.sort(key=lambda x: -x[1])
-    print >>sys.stderr, "%d words of %d (w/o markers) included" % (flags.max_vocab - 3, len(wdict))
-    word_freqs = [(x, i + 3) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab - 3]
+    if flags.dict:
+        pre_embed, pre_dict = load_vecs(flags.dict)
+        word_freqs = filter(lambda x: x[0] in pre_dict, word_freqs)
+        word_freqs = [("<unk>", 0), ("<para_end>", 0), ("<doc_end>", 0)] + word_freqs
+        word_freqs = [(x, i) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab]
+        shin_embed = np.array([pre_embed[pre_dict[w]] for w, _ in word_freqs])
+    else:
+        print >>sys.stderr, "%d words of %d (w/o markers) included" % (flags.max_vocab - 3, len(wdict))
+        word_freqs = [(x, i + 3) for i, (x, _) in enumerate(word_freqs)][:flags.max_vocab - 3]
+        word_freqs = [("<unk>", 0), ("%%para_end%%", 1), ("%%doc_end%%", 2)] + word_freqs
+    #
     wdict = dict(word_freqs)
-    wdict["%%unk%%"] = 0
-    wdict["%%para_end%%"] = 1
-    wdict["%%doc_end%%"] = 2
     n_vocab = len(wdict)
 
     # Token->ID
     nstories = []
     for text, highlight in stories:
         nstories.append((update_doc(text, wdict), update_doc(highlight, wdict)))
-    stories = nstories 
-    
+    stories = nstories
+
     #
     print >>sys.stderr, "document updated"
     # print wdict, stories[0]
 
-    # 
+    #
     with open(dump_prefix + '.dict', 'wb') as fd:
         cPickle.dump(wdict, fd)
     with open(dump_prefix + '.train', 'wb') as ft:
         cPickle.dump(stories, ft)
+    if flags.dict:
+        with open(dump_prefix + '.embed', 'wb') as fe:
+            cPickle.dump(shin_embed, fe)
 
 if __name__ == '__main__':
     main()
