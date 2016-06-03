@@ -34,7 +34,7 @@ class Attention:
         """
         if att_type == 'bilinear':
             self.W = init_matrix_u((s0, s1), pref + '_W', pdict)
-            self.U = init_matrix_u((s0, s2), pref + '_U', pdict) if not no_context else None 
+            self.U = init_matrix_u((s0, s2), pref + '_U', pdict) if not no_context else None
             self.xb = init_matrix_u((s0,), pref + '_xb', pdict)
             self.yb = init_matrix_u((s1,), pref + '_yb', pdict)
             self.get_params = lambda: [self.W, self.xb, self.yb] + ([self.U] if not no_context else [])
@@ -110,9 +110,11 @@ class SentEncoder:
             doc_ruler = T.cast(doc_ruler.T, 'float32') # (n_sent, n_doc_batch)
             doc_hidden = T.concatenate([doc_hidden, T.shape_padright(doc_ruler)], axis=2)
 
-        return doc_hidden, last_hid, concat_updates(upd0, upd1)
+        if flags["pick_model"]:
+            return doc_hidden, last_hid, h_encs[:, -1], concat_updates(upd0, upd1)
+        else:
+            return doc_hidden, last_hid, concat_updates(upd0, upd1)
         # return h_encs[:, -1], T.zeros_like(last_hid), concat_updates(upd0, upd1)
-        
 
 class WordDecoder:
 
@@ -259,6 +261,188 @@ class WordDecoder:
         return results
 
 
+
+class SentPicker:
+    # decoder
+    def __init__(self, pdict, dropout):
+        self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'], flags['n_hidden'], dropout, 'sentpick_rnn', pdict)
+        # p(y_t=1 | hid) = sigmoid(h_enc_t . W_enc + h_dec_t . W_dec)
+        # TODO: can be modified to be a whole matrix mulitplication
+        # W ~ [n_hid]
+        self.W_enc = init_matrix_u((flags["n_hidden"],), 'sentpick_w_enc', pdict)
+        self.W_dec = init_matrix_u((flags["n_hidden"],), 'sentpick_w_dec', pdict)
+        self.dropout = dropout
+
+    def get_params(self):
+        return self.rnn.get_params() + [self.W_enc, self.W_dec]
+
+    def decode(self, h_0, exp_p, exp_p_m1, p_mask, s_encs, h_encs):
+        # ref output
+        # h_decs.shape ~ [n_sent, n_doc_batch, n_hid]
+        # s_encs ~ [n_sent, n_doc_batch, n_hid]
+        # exp_p ~ [n_sent, n_doc_batch]
+        exp_p_m1_broadcast = exp_p_m1.dimshuffle((0, 1, "x"))
+        inputs = exp_p_m1_broadcast * s_encs
+        h_decs, upd_1, _ = self.rnn.forward(inputs=inputs, masks=p_mask, h_0=h_0)
+        h_decs = h_decs[:, -1] # remove all but last layer
+        def step(h_enc_t, h_dec_t, exp_p_t, W_enc, W_dec):
+            prob = T.dot(h_enc_t, W_enc) + T.dot(h_dec_t, W_dec)
+            prob = T.nnet.sigmoid(prob) # p(y=1)
+            loss = - (exp_p_t * T.log(prob) + (1-exp_p_t) * T.log(1-prob))
+            return loss
+
+        losses, upd_2 = theano.scan(
+            fn=step,
+            sequences = [h_encs, h_decs, exp_p],
+            outputs_info = [None],
+            non_sequences = [self. W_enc, self.W_dec], # dropout
+            strict = True)
+
+        return losses, concat_updates(upd_1, upd_2)
+
+    def predict(self, h_0, s_encs, h_encs): #TODO
+        # predict output
+        probs, upd = self.rnn.forward_p(h_0, self.W_enc, self.W_dec, s_encs, h_encs)
+        return probs, upd # .dimshuffle((1, 0))
+
+class RNNPicker:
+    """
+    TODO:
+    save: load_npz, pdict
+    dropout: each layer
+
+    encoder + decoder
+    """
+    def get_params(self):
+        return self.encoder.get_params() + self.decoder.get_params() + [self.embed]
+
+    def __init__(self):
+        # load params if required
+        if flags["load_npz"].strip() != "":
+            pdict = np.load(flags["load_npz"].strip())
+            np.random.set_state(pdict["__np_random_state__"])
+        else:
+            pdict = None
+
+        # Init dropout
+        # NOTE: If we're loading from an existing model,
+        # we need to copy random state _after_ the function is compiled.
+        self.pdict = pdict
+        self.dropout = Dropout(flags["dropout_prob"])
+
+        # Models
+        self.encoder = SentEncoder(pdict, self.dropout)
+        self.decoder = SentPicker(pdict, self.dropout) # TODO
+
+        if not (pdict and 'embed' in pdict) and flags['wordvec']: # Use pre-trained wordvec.
+            with open(flags['wordvec']) as fin:
+                pdict['embed'] = cPickle.load(fin)
+        self.embed = init_matrix_u((flags["n_vocab"], flags["n_embed"]), "embed", pdict)
+
+    def save(self, file_):
+        params = self.get_params()
+        pdict = {}
+        for p in params:
+            assert not (p.name in pdict)
+            pdict[p.name] = p.get_value()
+        pdict['__np_random_state__'] = np.array(np.random.get_state(), dtype='object')
+        pdict['__theano_mrg_rstate__'] = np.array(self.dropout.rng.rstate, dtype='object')
+        pdict['__theano_mrg_state_updates__'] = np.array(self.dropout.rng.state_updates, dtype='object')
+        np.savez(file_, **pdict)
+
+    def train(self, epoch, X, Y):
+        """
+        @param X[0..3]: Input doc info. Check SentEncoder.forward
+                        X[0] ~ T(*sum_sent_len, *batch_size) [i64, data]
+                        X[1] ~ T(*sum_sent_len, *batch_size) [f32, mask]
+                        X[2] ~ T(*n_sent, *n_doc_batch)      [i64, doc_sent_pos]
+                        X[3] ~ T(*n_sent, *n_doc_batch)      [f32, doc_mask]
+        @param Y:       Expected output labels.
+                        Y[0] ~ T(*n_sent, *n_doc_batch) [f32] for loss calculation, p_t
+                        Y[1] ~ T(*n_sent, *n_doc_batch) [f32] for sequence input, p_tm1
+        @return: (loss, upd for validator, upd for trainer)
+        """
+        X[0] = self.embed[X[0]]
+        exp_p = Y[0]
+        exp_p_m1 = Y[1]
+        p_mask = X[3]
+
+        # == Encoding ==
+        s_sentences, lasthid_enc, h_encs, upd_enc = self.encoder.forward(*X)
+        # s_sentences.shape ~ [n_sent, n_doc_batch, n_hid]
+        # lasthid_enc.shape ~ [n_layer, n_doc_batch, n_hid]
+        # h_encs.shape ~ [n_sent, n_doc_batch, n_hid]
+
+        # ignore now
+        # s_sentences = s_sentences.dimshuffle((1, 0, 2))  # OPTME
+        # h_encs = h_encs.dimshuffle((1, 0, 2))
+
+        batch_size = h_encs.shape[1]
+        losses, upd_dec = self.decoder.decode(lasthid_enc, exp_p, exp_p_m1, p_mask, s_sentences, h_encs)
+        loss = T.sum(losses) / T.cast(batch_size, 'float32')
+
+        def step(prob, exp_p):
+            # prob, exp_p ~ T[n_batch]
+            loss = - (exp_p * T.log(prob) + (1-exp_p) * T.log(1-prob))
+            return loss
+
+        probs, upd_dec2 = self.decoder.predict(lasthid_enc, s_sentences, h_encs)
+
+        losses2, upd_dec3 = theano.scan(
+            fn = step,
+            sequences=[probs, exp_p],
+            outputs_info=[None],
+            non_sequences=None,
+            strict=True)
+        loss2 = T.sum(losses2) / T.cast(batch_size, 'float32')
+
+        if flags["cur_learning"]:
+            coef = (epoch+.0)/flags["n_epochs"]
+            loss = (1-coef)*loss + coef*loss2
+            rng_updates = upd_enc + upd_dec + upd_dec2 + upd_dec3
+        else:
+            rng_updates = concat_updates(upd_enc, upd_dec)
+
+        grad = T.grad(-loss, self.get_params())
+        return self.get_params(), loss, grad, rng_updates
+
+    def test(self, X):
+        """
+        @param X: same as train
+        @return:  Generated probabilities for each sentence.
+        """
+        def compile_aux():
+            self.aux_compiled = True
+            # forward
+            args = [T.lmatrix("X_data"), T.fmatrix("X_mask"), T.lmatrix("X_pos"), T.fmatrix("X_mask_d")]
+            X = [a for a in args]
+            X[0] =self.embed[X[0]]
+            s_encs, last_hid, h_encs, upd_enc = self.encoder.forward(*X)
+            # self.f_forward = theano.function(args, (s_encs, last_hid, h_encs), updates=upd_enc)
+            # p_args = []
+            probs, upd_dec = self.decoder.predict(last_hid, s_encs, h_encs)
+            self.predict = theano.function(args, probs, updates=upd_enc+upd_dec)
+
+        # == test(self, X): ==
+        if not hasattr(self, 'aux_compiled'):
+            compile_aux()
+
+        # Need to compute h_encs, lasthid, s_encs;
+        probs = self.predict(*X)
+        return probs
+
+    def init_rng(self):
+        """
+        Restore theano rng state. Must be called _after_ compilation
+        # TODO
+        """
+        if flags['load_npz'].strip() != "":
+            self.dropout.rng.rstate = self.pdict['__theano_mrg_rstate__']
+            for (su2, su1) in zip(self.dropout.rng.state_updates, self.pdict['__theano_mrg_state_updates__'][0]):
+                su2[0].set_value(su1[0].get_value())
+
+
+
 class SoftDecoder:
 
     def get_params(self):
@@ -281,11 +465,11 @@ class SoftDecoder:
         self.dropout = Dropout(flags['dropout_prob'])
 
         # Init slave models
-        n_att_input = flags['n_hidden'] + 1 if flags['attend_pos'] else flags['n_hidden']
+        n_att_input = flags['n_hidden'] + 1 if flags['attend_pos'] else flags['n_']
         self.attention = Attention(n_att_input, flags['n_hidden'], flags['n_context'], 
                                    'bilinear', 'softdec_att', pdict)
         self.encoder = SentEncoder(pdict, self.dropout)
-        self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'] + flags['n_context'], flags['n_hidden'], 
+        self.rnn = lstm.LSTM(flags['n_layers'], flags['n_hidden'] + flags['n_context'], flags['n_hidden'],
                              self.dropout, 'softdec_rnn', pdict)
 
         if not (pdict and 'embed' in pdict) and flags['wordvec']: # Use pre-trained wordvec.
@@ -310,7 +494,7 @@ class SoftDecoder:
         # Code folding
         att_context = self.attention(h_encs, h_dec_tm1[-1]) # (n_doc_batch, n_context)
         inp = T.concatenate([x_dec_tm1, att_context], axis=1)
-        c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, dropout_mask, c_dec_tm1, h_dec_tm1) 
+        c_dec_t, h_dec_t = self.rnn.step(inp, doc_mask, dropout_mask, c_dec_tm1, h_dec_tm1)
         return c_dec_t, h_dec_t
 
     def att_step(self, exp_sent, exp_mask, doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs, output_words, *args):
@@ -328,7 +512,7 @@ class SoftDecoder:
         """ 
         output_words = output_words if self.use_output_words else None # Otherwise it will be what should be *args[0]
         c_dec_t, h_dec_t = self.att_step_rnn(doc_mask, dropout_mask, h_dec_tm1, c_dec_tm1, x_dec_tm1, h_encs)
-        (last_hidden, prob), upd = self.decoder.decode(h_dec_t, exp_sent, exp_mask, output_words) 
+        (last_hidden, prob), upd = self.decoder.decode(h_dec_t, exp_sent, exp_mask, output_words)
         x_dec_t = last_hidden[-1]
         return (h_dec_t, c_dec_t, x_dec_t, prob), upd
 
@@ -358,7 +542,7 @@ class SoftDecoder:
         
         batch_size = h_sentences.shape[0]
         scan_params = self.rnn.get_params() + self.attention.get_params() + self.decoder.get_params() \
-                + [self.embed, self.dropout.switch] 
+                + [self.embed, self.dropout.switch]
         if output_words:
             scan_params = [output_words] + scan_params
         dropout_masks = self.dropout.prep_mask(
@@ -376,7 +560,7 @@ class SoftDecoder:
         #
 
         loss = -T.sum(probs) / T.cast(batch_size, 'float32')
-        grad = T.grad(-loss, self.get_params()) 
+        grad = T.grad(-loss, self.get_params())
         rng_updates = concat_updates(upd_enc, upd_dec)
         return self.get_params(), loss, grad, rng_updates
 

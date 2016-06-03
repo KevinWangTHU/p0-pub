@@ -51,7 +51,7 @@ gflags.DEFINE_string('func_input', '', 'Use compiled function if valid')
 gflags.DEFINE_string('dump_prefix', '-', 'as shown; - for autocreate')
 gflags.DEFINE_string('load_npz', '', 'empty to train from scratch; otherwise resume from corresponding file')
 gflags.DEFINE_string('wordvec', None, 'Pre-trained word vector file. Check data/proc for format.')
-gflags.DEFINE_string('train_data', './data/100k3', 'path of training data')
+gflags.DEFINE_string('train_data', './data/100ktest', 'path of training data')
 gflags.DEFINE_bool('test_value', False, 'Compute test value of theano') # Issue with MRG
 gflags.DEFINE_bool('trunc_data', False, 'Use ~100 docs for quick test')
 

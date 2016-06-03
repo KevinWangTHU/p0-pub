@@ -7,6 +7,7 @@ import theano
 import copy
 
 from util import *
+import IPython
 
 
 def build_sent_batch(sentences_annotated, n_sent_batch, n_docs, max_doc_len):
@@ -101,9 +102,9 @@ def build_input(docs, flags):
                 doc = copy.deepcopy(highlight)
             n_word = len(doc[0][0])
             n_docs.append((n_word, doc, highlight))
-            
+
     n_docs.sort(key=lambda x: x[0])
-    n_docs = [x[1:] for x in n_docs]            
+    n_docs = [x[1:] for x in n_docs]
 
     if flags['reverse_input']:
         revdoc = lambda doc: \
@@ -118,14 +119,14 @@ def build_input(docs, flags):
     for i in xrange(0, len(n_docs), n_doc_batch):
         cur_docs = n_docs[i: i+n_doc_batch]
 
-        # remove paragraph structure that is not yet utilized 
+        # remove paragraph structure that is not yet utilized
         cur_docs = [(concat(p), concat(h)) for p, h in cur_docs]
-        
+
         # allowed_words
         if flags['lvt']:
             allowed_words = get_allowed_words(cur_docs, flags['n_out_vocab'], flags['n_vocab'])
             dict_allowed_words = dict([(w, _) for _, w in enumerate(allowed_words)])
-        
+
         # Document
         # - doc_mask
         cur_doc_lens = [len(p) for p, _ in cur_docs]
@@ -147,7 +148,7 @@ def build_input(docs, flags):
         else:
             concated_sent, concated_mask, doc_sent_pos = build_sent_batch(
                 all_sent_annotated, len(cur_docs), len(cur_docs), max_doc_len)
-        
+
         # Highlight
         # - mask
         cur_hl_lens = [len(h) for _, h in cur_docs]
@@ -197,8 +198,8 @@ def load_data(flags):
     if flags['trunc_data']:
         all_docs = all_docs[split-50: split+50]
         split = 50
-    return build_input(all_docs[:split], flags), \
-           build_input(all_docs[split:], flags)
+    return new_build_input(all_docs[:split], flags), \
+           new_build_input(all_docs[split:], flags)
 
 
 def load_test_data(flags):
@@ -213,6 +214,103 @@ def load_test_data(flags):
         with open('test_last.train', 'w') as fout:
             cPickle.dump(all_docs, fout)
 
-    ret = build_input(all_docs, flags)
+    ret = new_build_input(all_docs, flags)
     np.random.shuffle(ret)
     return ret
+
+
+
+def build_train_input(cur_docs, flags):
+    ori_texts = [c for a, b, c, d in cur_docs]
+    ori_hlts = [d for a, b, c, d in cur_docs]
+    cur_docs = [(a, b) for a, b, c, d in cur_docs]
+    n_doc_batch = flags['n_doc_batch']
+    n_sent_batch = flags['n_sent_batch']
+    allow_all_words = np.array(list(xrange(0, flags['n_vocab']))).astype('q')
+
+    # allowed_words
+    if flags['lvt']:
+        allowed_words = get_allowed_words(cur_docs, flags['n_out_vocab'], flags['n_vocab'])
+        dict_allowed_words = dict([(w, _) for _, w in enumerate(allowed_words)])
+
+    # Document
+    # - doc_mask
+    cur_doc_lens = [len(p) for p, _ in cur_docs]
+    max_doc_len = max(cur_doc_lens)
+    doc_mask = np.zeros((max_doc_len, len(cur_docs)), dtype=np.float32)
+    for j in xrange(len(cur_docs)):
+        doc_mask[:cur_doc_lens[j], j] = 1.
+
+    # - List of word-level batches
+    cur_docs_annotated = [[(len(sent), sent, d_id, s_id)
+                           for s_id, sent in enumerate(doc)]
+                          for d_id, (doc, _) in enumerate(cur_docs)]
+    all_sent_annotated = concat(cur_docs_annotated)
+    if not flags['simplernn']:
+        # Speedup
+        all_sent_annotated.sort(key=operator.itemgetter(0))
+        concated_sent, concated_mask, doc_sent_pos = build_sent_batch(
+            all_sent_annotated, n_sent_batch, len(cur_docs), max_doc_len)
+    else:
+        concated_sent, concated_mask, doc_sent_pos = build_sent_batch(
+            all_sent_annotated, len(cur_docs), len(cur_docs), max_doc_len)
+
+    # Picked highlight
+    cur_pks = np.asarray([pk for _, pk in cur_docs], dtype=np.float32)
+    cur_pks_previous = np.concatenate((np.zeros((len(cur_pks), 1), np.float32), cur_pks), axis=1)
+    train_input = (concated_sent, concated_mask, doc_sent_pos, doc_mask,
+                   cur_pks.T, cur_pks_previous.T[:-1])
+    return train_input, len(cur_pks), ori_texts, ori_hlts
+
+
+def new_build_input(docs, flags):
+    """
+    @return:    [(id,
+                  (concated_sent, concated_mask, doc_sent_pos, doc_mask,
+                   picked_sentence),
+                  [original_texts])
+                 for each batch]
+                if flags['simplernn'] == True,
+                  NotImplemented yet.
+
+    """
+    n_docs = []
+    count = 0
+
+    if not flags ["simplernn"]:
+        for doc, pick, ori_doc, ori_hlt in docs:
+            n_sent = sum([len(para) for para in doc])
+            n_docs.append((n_sent, doc, pick, ori_doc, ori_hlt))
+    else:
+        raise NotImplementedError
+
+    n_docs.sort(key=lambda x: x[0])
+    n_docs = [x[1:] for x in n_docs]
+
+    if flags['reverse_input']:
+        revdoc = lambda doc: \
+        [[list(reversed(sentence)) for sentence in reversed(paragraph)] for paragraph in reversed(doc)]
+        n_docs = [(revdoc(doc), hlt, ori_doc, ori_hlt) for doc, hlt, ori_doc, ori_hlt in n_docs]
+
+    # Build batches
+    batches = []
+    n_doc_batch = flags['n_doc_batch']
+    n_sent_batch = flags['n_sent_batch']
+    allow_all_words = np.array(list(xrange(0, flags['n_vocab']))).astype('q')
+
+    cur_docs = [(concat(n_docs[0][0]), n_docs[0][1], n_docs[0][2], n_docs[0][3])]
+    i = 1
+    while i < len(n_docs):
+        if len(cur_docs) == n_doc_batch or len(n_docs[i][1]) > len(cur_docs[0][1]):
+            # cur_docs should be a batch
+            train_input, batch_num, ori_texts, ori_hlts = build_train_input(cur_docs, flags)
+            batches.append((i-batch_num, train_input, ori_texts, ori_hlts))
+            cur_docs = [(concat(n_docs[i][0]), n_docs[i][1], n_docs[i][2], n_docs[i][3])]
+        else:
+            cur_docs.append((concat(n_docs[i][0]), n_docs[i][1], n_docs[i][2], n_docs[i][3]))
+        i += 1
+    train_input, batch_num, ori_texts, ori_hlts = build_train_input(cur_docs, flags)
+    batches.append((i-batch_num, train_input, ori_texts, ori_hlts))
+
+    log_info({'type': 'data', 'value': 'data loaded'})
+    return batches
